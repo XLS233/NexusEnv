@@ -157,6 +157,63 @@ depends = myserver
 
 配置中的 `~` 会在挂载时自动解析为远程服务器的实际 home 路径（通过 `ssh <host> 'echo $HOME'`）。这意味着即使不同服务器的 home 路径不同（如 `/home/john`、`/home/S/john`），配置里统一写 `~` 即可。
 
+## 最佳实践
+
+### 挂载远程项目到本机开发
+
+SSHFS 挂载后，远程文件在本地以普通文件形式存在，可以直接用本地编辑器和工具操作：
+
+```bash
+# 1. 连接服务器
+./nexus connect myserver
+
+# 2. 挂载远程文件系统
+./nexus mount myserver
+
+# 3. 用本地编辑器直接打开远程项目
+code ~/mnt/myserver/workspace/my-project
+# 或
+vim ~/mnt/myserver/workspace/my-project/main.py
+```
+
+挂载后的目录结构就像本地文件一样，所有编辑都会实时同步到远程服务器。
+
+### 用本地 Claude Code 开发远程项目
+
+NexusEnv 的核心场景之一：**在本地运行 Claude Code，直接开发挂载到本地的远程项目**。这样既能享受本地 Claude Code 的交互体验，又能操作远程服务器上的代码和环境。
+
+**步骤：**
+
+```bash
+# 1. 确保连接和挂载就绪
+./nexus connect myserver
+./nexus mount myserver
+
+# 2. 在远程项目目录放置 CLAUDE.md（告诉 Claude Code 如何操作远程环境）
+cp templates/CLAUDE.md ~/mnt/myserver/workspace/my-project/CLAUDE.md
+# 编辑其中的 SERVER_NAME、REMOTE_PATH 等占位符
+
+# 3. 进入挂载目录，启动 Claude Code
+cd ~/mnt/myserver/workspace/my-project
+claude
+```
+
+**CLAUDE.md 模板的作用：**
+
+`templates/CLAUDE.md` 是为远程项目准备的 Claude Code 指令模板。放置在项目目录后，Claude Code 会自动读取，从而知道：
+
+- 文件编辑通过 SSHFS 挂载直接进行（Read/Edit 工具）
+- 命令执行需要通过 SSH：`ssh myserver "cd /path && command"`
+- GPU 任务需要通过 Slurm 调度（`sbatch`/`srun`）
+
+**实际效果：**
+
+- Claude Code 读写文件 → 直接操作挂载目录，实时同步到远程
+- Claude Code 运行命令 → 通过 SSH ControlMaster 复用连接，无需认证
+- Claude Code 查看日志/调试 → `ssh myserver "tail -f /path/to/log"`
+
+> **提示**: 编辑 `templates/CLAUDE.md` 中的占位符（`SERVER_NAME`、`REMOTE_PATH`、`YOUR_USER`）为实际值后再放入项目目录。
+
 ## 工作原理
 
 ```
