@@ -1,36 +1,55 @@
-# PROJECT_NAME
+# 远程项目 — {PROJECT_NAME}
 
-位于 **SERVER_NAME** 服务器的远程项目。
+这是一个通过 NexusEnv SSHFS 挂载到本地的远程项目。
 
-## 环境信息
+## 环境
 
-- **服务器**: SERVER_NAME
-- **远程路径**: REMOTE_PATH
-- **本地挂载**: ~/mnt/SERVER_NAME/workspace/...
+- 服务器: {HOST}
+- 远程路径: {REMOTE_PATH}
+- 本地挂载点: ~/mnt/{HOST}/{TARGET}/...
 
-## 执行规则
+## 操作方式
 
-1. **编辑文件** - 通过 SSHFS 挂载，直接使用 Read/Edit 工具
-2. **执行命令** - 通过 SSH 复用连接：
-   ```bash
-   ssh SERVER_NAME "cd REMOTE_PATH && <command>"
-   ```
-3. **GPU 训练** - 使用 Slurm 调度：
-   ```bash
-   ssh SERVER_NAME "cd REMOTE_PATH && sbatch train.slurm"
-   ssh SERVER_NAME "squeue -u YOUR_USER"
-   ```
+### 文件读写
 
-## 操作前检查
+当前目录已通过 SSHFS 挂载，直接使用 Read/Edit/Write 工具操作文件即可，改动会实时同步到远程服务器。
 
-执行远程操作前，先确认连接状态：
+### 执行命令
+
+本地 shell 命令会在本机执行，**不会**在远程服务器上运行。需要在远程执行的命令（编译、测试、运行服务等）必须通过 SSH：
+
 ```bash
-nexus status
+ssh {HOST} "cd {REMOTE_PATH} && <command>"
 ```
-如果未连接，提示用户运行 `nexus connect SERVER_NAME`
+
+常见场景：
+
+```bash
+# 安装依赖
+ssh {HOST} "cd {REMOTE_PATH} && pip install -r requirements.txt"
+
+# 运行测试
+ssh {HOST} "cd {REMOTE_PATH} && pytest"
+
+# 查看日志
+ssh {HOST} "tail -f {REMOTE_PATH}/logs/app.log"
+
+# 检查进程
+ssh {HOST} "ps aux | grep my_service"
+```
+
+### 连接检查
+
+执行远程命令前，先确认 SSH 连接可用：
+
+```bash
+ssh -O check {HOST}
+```
+
+如果连接已断开，提示用户运行 `nexus connect {HOST}` 重新建立连接。
 
 ## 注意事项
 
-- GPU 节点：计算任务使用 `sbatch` 或 `srun`，登录节点仅用于轻量任务
-- 数据目录：根据实际环境修改
-- 连接超时 4 小时，超时后需重新 `nexus connect`
+- SSH ControlMaster 连接默认 4 小时超时，超时后需用户重新 `nexus connect`
+- SSHFS 挂载依赖 SSH 连接，连接断开后文件操作会报错（I/O error）
+- 不要在本地运行需要远程环境的命令（如依赖远程 GPU、远程数据库等）

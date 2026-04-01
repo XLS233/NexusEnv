@@ -191,7 +191,7 @@ NexusEnv 的核心场景之一：**在本地运行 Claude Code，直接开发挂
 
 # 2. 在远程项目目录放置 CLAUDE.md（告诉 Claude Code 如何操作远程环境）
 cp templates/CLAUDE.md ~/mnt/myserver/workspace/my-project/CLAUDE.md
-# 编辑其中的 SERVER_NAME、REMOTE_PATH 等占位符
+# 编辑其中的 {HOST}、{REMOTE_PATH} 等占位符
 
 # 3. 进入挂载目录，启动 Claude Code
 cd ~/mnt/myserver/workspace/my-project
@@ -202,9 +202,9 @@ claude
 
 `templates/CLAUDE.md` 是为远程项目准备的 Claude Code 指令模板。放置在项目目录后，Claude Code 会自动读取，从而知道：
 
-- 文件编辑通过 SSHFS 挂载直接进行（Read/Edit 工具）
-- 命令执行需要通过 SSH：`ssh myserver "cd /path && command"`
-- GPU 任务需要通过 Slurm 调度（`sbatch`/`srun`）
+- 文件读写直接操作挂载目录即可，改动实时同步
+- 命令执行必须通过 SSH：`ssh myserver "cd /path && command"`
+- 连接断开时文件操作会报 I/O error，需重新 `nexus connect`
 
 **实际效果：**
 
@@ -212,7 +212,7 @@ claude
 - Claude Code 运行命令 → 通过 SSH ControlMaster 复用连接，无需认证
 - Claude Code 查看日志/调试 → `ssh myserver "tail -f /path/to/log"`
 
-> **提示**: 编辑 `templates/CLAUDE.md` 中的占位符（`SERVER_NAME`、`REMOTE_PATH`、`YOUR_USER`）为实际值后再放入项目目录。
+> **提示**: 编辑 `templates/CLAUDE.md` 中的占位符（`{HOST}`、`{REMOTE_PATH}`、`{TARGET}`、`{PROJECT_NAME}`）为实际值后再放入项目目录。
 
 ## 工作原理
 
