@@ -58,6 +58,10 @@ export PATH="$HOME/.local/bin:$PATH"
 扫描 ~/.ssh/config 中的 Host...
 
 添加 myserver 到 nexus 配置? [Y/n] Y
+  服务器类型:
+    1) cloud  — 普通云服务器（有 sudo 权限）
+    2) slurm  — Slurm 集群（GPU 任务通过 sbatch 提交）
+  选择 [1]: 1
   默认已添加 home = ~ (远程 home 目录)
   如需挂载其他远程目录（如工作目录、共享存储等），请逐个添加:
 
@@ -66,7 +70,7 @@ export PATH="$HOME/.local/bin:$PATH"
   + workspace = /data/workspace (将挂载到 ~/mnt/myserver/workspace/)
 
   挂载名称 (如 workspace、nfs，直接回车跳过):
-  ✓ 已添加 myserver (user=john)
+  ✓ 已添加 myserver (type=cloud, user=john)
 ```
 
 - `home = ~` 自动添加，`~` 会在挂载时解析为远程服务器的实际 home 路径
@@ -104,6 +108,7 @@ export PATH="$HOME/.local/bin:$PATH"
 | `./nexus umount <host> [target]` | 卸载 SSHFS 挂载 |
 | `./nexus status` | 查看所有连接和挂载状态 |
 | `./nexus health` | 连接健康检查（含延迟测量） |
+| `./nexus claude <host> <path>` | 为远程项目生成 Claude Code 配置 |
 | `./nexus sync <host>` | 同步 NexusEnv 到远程服务器 |
 | `./nexus init` | 扫描 SSH 配置并生成 nexus 配置 |
 | `./nexus setup` | 运行完整安装流程 |
@@ -129,6 +134,7 @@ socket_dir = ~/.ssh/sockets
 control_persist = 14400
 
 [server.myserver]
+type = cloud
 home = ~
 workspace = /data/workspace
 nfs = /nfs_shared/data
@@ -137,6 +143,7 @@ ssh_workdir = /data/workspace
 depends =
 
 [server.internal]
+type = slurm
 home = ~
 default_mounts = home
 ssh_workdir = ~
@@ -148,6 +155,7 @@ depends = myserver
 
 | 字段 | 说明 |
 |------|------|
+| `type` | 服务器类型：`cloud`（普通云服务器）或 `slurm`（Slurm 集群） |
 | `home`, `workspace`, `nfs`, ... | 远程路径（key 即挂载目标名，`~` 表示远程 home） |
 | `default_mounts` | `./nexus mount <host>` 无参数时挂载的目标（逗号分隔） |
 | `ssh_workdir` | `./nexus ssh` 自动 cd 的目录 |
@@ -189,30 +197,28 @@ NexusEnv 的核心场景之一：**在本地运行 Claude Code，直接开发挂
 ./nexus connect myserver
 ./nexus mount myserver
 
-# 2. 在远程项目目录放置 CLAUDE.md（告诉 Claude Code 如何操作远程环境）
-cp templates/CLAUDE.md ~/mnt/myserver/workspace/my-project/CLAUDE.md
-# 编辑其中的 {HOST}、{REMOTE_PATH} 等占位符
+# 2. 一键生成 CLAUDE.md（自动填充服务器信息，根据类型选择模板）
+./nexus claude myserver /data/workspace/my-project
 
 # 3. 进入挂载目录，启动 Claude Code
 cd ~/mnt/myserver/workspace/my-project
 claude
 ```
 
-**CLAUDE.md 模板的作用：**
+`nexus claude` 会根据配置中的服务器类型（`type = cloud` 或 `type = slurm`）自动选择对应模板，填充服务器地址、远程路径等信息，生成 CLAUDE.md 到本地挂载目录。
 
-`templates/CLAUDE.md` 是为远程项目准备的 Claude Code 指令模板。放置在项目目录后，Claude Code 会自动读取，从而知道：
+**生成的 CLAUDE.md 告诉 Claude Code：**
 
 - 文件读写直接操作挂载目录即可，改动实时同步
 - 命令执行必须通过 SSH：`ssh myserver "cd /path && command"`
-- 连接断开时文件操作会报 I/O error，需重新 `nexus connect`
+- cloud 类型：可以 sudo 安装包、管理服务、操作 Docker
+- slurm 类型：计算任务必须通过 sbatch/srun 提交，不要在登录节点跑 GPU 任务
 
 **实际效果：**
 
 - Claude Code 读写文件 → 直接操作挂载目录，实时同步到远程
 - Claude Code 运行命令 → 通过 SSH ControlMaster 复用连接，无需认证
 - Claude Code 查看日志/调试 → `ssh myserver "tail -f /path/to/log"`
-
-> **提示**: 编辑 `templates/CLAUDE.md` 中的占位符（`{HOST}`、`{REMOTE_PATH}`、`{TARGET}`、`{PROJECT_NAME}`）为实际值后再放入项目目录。
 
 ## 工作原理
 
@@ -261,7 +267,8 @@ NexusEnv/
 │   ├── example.conf      # 配置文件示例
 │   └── ssh_controlmaster.conf  # SSH ControlMaster 配置模板
 └── templates/
-    └── CLAUDE.md         # 远程项目 Claude Code 集成模板
+    ├── claude-cloud.md   # 云服务器 Claude Code 模板
+    └── claude-slurm.md   # Slurm 集群 Claude Code 模板
 ```
 
 ## License

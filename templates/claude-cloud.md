@@ -1,12 +1,12 @@
 # 远程项目 — {PROJECT_NAME}
 
-这是一个通过 NexusEnv SSHFS 挂载到本地的远程项目。
+这是一个通过 NexusEnv SSHFS 挂载到本地的远程项目，运行在一台有 sudo 权限的云服务器上。
 
 ## 环境
 
 - 服务器: {HOST}
 - 远程路径: {REMOTE_PATH}
-- 本地挂载点: ~/mnt/{HOST}/{TARGET}/...
+- 本地挂载点: {LOCAL_MOUNT}
 
 ## 操作方式
 
@@ -16,26 +16,35 @@
 
 ### 执行命令
 
-本地 shell 命令会在本机执行，**不会**在远程服务器上运行。需要在远程执行的命令（编译、测试、运行服务等）必须通过 SSH：
+本地 shell 命令在本机执行，**不会**在远程服务器上运行。所有需要远程执行的命令必须通过 SSH：
 
 ```bash
 ssh {HOST} "cd {REMOTE_PATH} && <command>"
 ```
 
-常见场景：
+这台服务器有 sudo 权限，可以直接安装软件包和管理服务。常见操作：
 
 ```bash
 # 安装依赖
 ssh {HOST} "cd {REMOTE_PATH} && pip install -r requirements.txt"
 
+# 系统包管理
+ssh {HOST} "sudo apt update && sudo apt install -y <package>"
+
 # 运行测试
 ssh {HOST} "cd {REMOTE_PATH} && pytest"
 
+# 启动/管理服务
+ssh {HOST} "sudo systemctl restart <service>"
+ssh {HOST} "sudo systemctl status <service>"
+
+# Docker 操作
+ssh {HOST} "cd {REMOTE_PATH} && docker compose up -d"
+ssh {HOST} "docker ps"
+
 # 查看日志
 ssh {HOST} "tail -f {REMOTE_PATH}/logs/app.log"
-
-# 检查进程
-ssh {HOST} "ps aux | grep my_service"
+ssh {HOST} "sudo journalctl -u <service> -f"
 ```
 
 ### 连接检查
@@ -52,4 +61,4 @@ ssh -O check {HOST}
 
 - SSH ControlMaster 连接默认 4 小时超时，超时后需用户重新 `nexus connect`
 - SSHFS 挂载依赖 SSH 连接，连接断开后文件操作会报错（I/O error）
-- 不要在本地运行需要远程环境的命令（如依赖远程 GPU、远程数据库等）
+- 有 sudo 权限，执行破坏性操作（rm -rf、systemctl stop 等）前务必确认

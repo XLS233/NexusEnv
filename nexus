@@ -397,6 +397,90 @@ cmd_ssh() {
     fi
 }
 
+cmd_claude() {
+    local host="${1:?用法: nexus claude <host> <remote_project_path>}"
+    local remote_path="${2:?用法: nexus claude <host> <remote_project_path>}"
+
+    # 获取服务器类型
+    local stype
+    stype="$(cfg_get_type "$host")"
+    local template_file="$SCRIPT_DIR/templates/claude-${stype}.md"
+
+    if [[ ! -f "$template_file" ]]; then
+        echo -e "${RED}未找到模板: ${template_file}${NC}"
+        echo -e "${YELLOW}支持的类型: cloud, slurm${NC}"
+        return 1
+    fi
+
+    # 推导项目名（取远程路径最后一段）
+    local project_name
+    project_name="$(basename "$remote_path")"
+
+    # 查找本地挂载点：遍历该 host 的挂载，找到包含 remote_path 的挂载
+    local local_mount=""
+    for target in $(get_mount_targets "$host") home; do
+        local rpath
+        rpath="$(get_remote_path "$host" "$target")"
+        local mp="$MOUNT_BASE/$host/$target"
+
+        # 展开远程 ~ 为实际路径
+        if [[ "$rpath" == "~" || "$rpath" == "~/"* ]]; then
+            if check_connection "$host" 2>/dev/null; then
+                local remote_home
+                remote_home=$(ssh "$host" 'echo $HOME' 2>/dev/null)
+                [[ -n "$remote_home" ]] && rpath="${rpath/#\~/$remote_home}"
+            fi
+        fi
+
+        # 检查 remote_path 是否在此挂载下
+        if [[ "$remote_path" == "$rpath"* ]]; then
+            local relative="${remote_path#"$rpath"}"
+            local_mount="${mp}${relative}"
+            break
+        fi
+    done
+
+    if [[ -z "$local_mount" ]]; then
+        echo -e "${YELLOW}无法确定本地挂载路径，请确保已运行 nexus mount ${host}${NC}"
+        echo -e "${YELLOW}将使用远程路径作为占位: ${remote_path}${NC}"
+        local_mount="~/mnt/${host}/...${remote_path}"
+    fi
+
+    # 检查本地挂载目录是否存在
+    local output_file=""
+    if [[ -d "$local_mount" ]]; then
+        output_file="$local_mount/CLAUDE.md"
+    else
+        # 挂载目录不存在，输出到当前目录
+        echo -e "${YELLOW}本地挂载目录不存在: ${local_mount}${NC}"
+        echo -e "${YELLOW}请确保已运行: nexus mount ${host}${NC}"
+        output_file="./CLAUDE.md"
+        echo -e "${CYAN}将生成到当前目录: ${output_file}${NC}"
+    fi
+
+    # 替换模板占位符
+    local content
+    content=$(<"$template_file")
+    content="${content//\{HOST\}/$host}"
+    content="${content//\{REMOTE_PATH\}/$remote_path}"
+    content="${content//\{PROJECT_NAME\}/$project_name}"
+    content="${content//\{LOCAL_MOUNT\}/$local_mount}"
+
+    # 检查目标文件是否已存在
+    if [[ -f "$output_file" ]]; then
+        echo -e "${YELLOW}已存在: ${output_file}${NC}"
+        read -rp "覆盖? [y/N] " ans
+        [[ "$ans" != [yY]* ]] && { echo "取消。"; return 0; }
+    fi
+
+    echo "$content" > "$output_file"
+    echo -e "${GREEN}[OK] CLAUDE.md 已生成: ${output_file}${NC}"
+    echo -e "${CYAN}模板类型: ${stype}${NC}"
+    echo -e ""
+    echo -e "现在可以进入项目目录启动 Claude Code:"
+    echo -e "  ${CYAN}cd $(dirname "$output_file") && claude${NC}"
+}
+
 cmd_init() {
     echo -e "${CYAN}=== NexusEnv 初始化 ===${NC}"
     echo ""
@@ -444,6 +528,17 @@ cmd_init() {
         local dep
         dep="$(_detect_proxy_dep "$host")"
 
+        # 选择服务器类型
+        local stype="cloud"
+        echo -e "  ${CYAN}服务器类型:${NC}"
+        echo -e "    1) cloud  — 普通云服务器（有 sudo 权限）"
+        echo -e "    2) slurm  — Slurm 集群（GPU 任务通过 sbatch 提交）"
+        read -rp "  选择 [1]: " type_choice
+        case "${type_choice:-1}" in
+            2|slurm) stype="slurm" ;;
+            *) stype="cloud" ;;
+        esac
+
         # 收集额外挂载路径
         local -a extra_mounts=()
         echo -e "  ${CYAN}默认已添加 home = ~ (远程 home 目录)${NC}"
@@ -461,8 +556,8 @@ cmd_init() {
             echo -e "  ${GREEN}+${NC} ${mname} = ${mpath} (将挂载到 ~/mnt/${host}/${mname}/)"
         done
 
-        cfg_append_server "$config_file" "$host" "$ruser" "$dep" "${extra_mounts[@]+"${extra_mounts[@]}"}"
-        echo -e "  ${GREEN}✓${NC} 已添加 ${host} (user=${ruser}${dep:+, depends=${dep}})"
+        cfg_append_server "$config_file" "$host" "$ruser" "$dep" "$stype" "${extra_mounts[@]+"${extra_mounts[@]}"}"
+        echo -e "  ${GREEN}✓${NC} 已添加 ${host} (type=${stype}, user=${ruser}${dep:+, depends=${dep}})"
     done
 
     echo ""
@@ -489,6 +584,7 @@ NexusEnv - 多机办公环境管理工具
   status                        查看所有连接和挂载状态
   mount <host> [target|path]    SSHFS 挂载远程目录
   umount <host> [target]        卸载 SSHFS
+  claude <host> <project_path>  为远程项目生成 Claude Code 配置文件
   sync <host>                   同步 NexusEnv 到远程服务器
   init                          扫描 SSH 配置并生成 nexus 配置文件
   setup                         初始化安装（依赖 + 配置）
@@ -506,6 +602,7 @@ NexusEnv - 多机办公环境管理工具
   nexus mount myserver workspace    # 只挂载 workspace
   nexus mount myserver /tmp         # 挂载自定义路径
   nexus umount myserver             # 卸载该服务器所有挂载
+  nexus claude myserver /data/workspace/proj  # 生成 CLAUDE.md
   nexus status                  # 查看状态
 
 配置文件: ~/.config/nexus/config
@@ -522,6 +619,7 @@ case "${1:-help}" in
     status)     cmd_status ;;
     mount)      shift; cmd_mount "$@" ;;
     umount)     shift; cmd_umount "$@" ;;
+    claude)     shift; cmd_claude "$@" ;;
     sync)       shift; cmd_sync "$@" ;;
     init)       cmd_init ;;
     setup)      cmd_setup ;;

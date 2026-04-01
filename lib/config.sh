@@ -141,7 +141,7 @@ cfg_get_mount_targets() {
             local field="${BASH_REMATCH[1]}"
             # 排除非路径字段
             case "$field" in
-                default_mounts|ssh_workdir|depends) continue ;;
+                default_mounts|ssh_workdir|depends|type) continue ;;
                 *)
                     local val="${_CFG[$key]}"
                     # 只有以 / 开头的值才是路径
@@ -170,6 +170,13 @@ cfg_get_default_mounts() {
 cfg_get_depends() {
     local server="$1"
     cfg_get "server.${server}" depends ""
+}
+
+# 获取服务器类型
+# 用法: cfg_get_type <server> -> "cloud" 或 "slurm"
+cfg_get_type() {
+    local server="$1"
+    cfg_get "server.${server}" type "cloud"
 }
 
 # 获取服务器 ssh 工作目录
@@ -241,11 +248,12 @@ HEADER
 }
 
 # 追加一个 server section 到配置文件
-# 用法: cfg_append_server <file> <name> <user> [depends] [extra_mount...]
+# 用法: cfg_append_server <file> <name> <user> [depends] [type] [extra_mount...]
 # extra_mount 格式: "name=path"，如 "workspace=/data/work"
+# type: cloud 或 slurm（默认 cloud）
 cfg_append_server() {
-    local file="$1" name="$2" user="$3" depends="${4:-}"
-    shift; shift; shift; shift 2>/dev/null || true  # skip file, name, user, depends
+    local file="$1" name="$2" user="$3" depends="${4:-}" type="${5:-cloud}"
+    shift; shift; shift; shift 2>/dev/null || true; shift 2>/dev/null || true
 
     local default_mounts="home"
     local extra_lines=""
@@ -261,6 +269,7 @@ cfg_append_server() {
 
     {
         echo "[server.${name}]"
+        echo "type = ${type}"
         echo "home = ~"
         [[ -n "$extra_lines" ]] && printf "%b" "$extra_lines"
         echo "default_mounts = ${default_mounts}"
