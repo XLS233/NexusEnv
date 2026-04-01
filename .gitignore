@@ -1,0 +1,10 @@
+# Claude Code local settings
+.claude/
+
+# User config (contains real server info)
+# Use config/example.conf as reference
+*.local.json
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,534 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# NexusEnv - 多机办公环境管理工具
+# 通过 SSH ControlMaster 复用连接 + SSHFS 挂载远程文件系统
+
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+# 加载配置库
+source "$SCRIPT_DIR/lib/config.sh"
+
+# 默认配置路径
+SOCKET_DIR="$(cfg_socket_dir)"
+MOUNT_BASE="$(cfg_mount_base)"
+
+# 颜色
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+# 确保配置已加载
+if ! cfg_ensure_loaded; then
+    # 如果是 help 或 setup 命令，允许不带配置文件运行
+    case "${1:-}" in
+        help|--help|-h|setup|init) : ;;
+        *)
+            echo -e "${RED}错误: 未找到配置文件，请先运行: nexus setup 或 nexus init${NC}"
+            exit 1
+            ;;
+    esac
+fi
+
+# 查询远程路径
+get_remote_path() {
+    local server="$1" target="$2"
+    cfg_get_path "$server" "$target"
+}
+
+# 获取服务器支持的挂载目标
+get_mount_targets() {
+    local server="$1"
+    cfg_get_mount_targets "$server"
+}
+
+# 从 ~/.ssh/config 中提取已定义的 Host（排除通配符和通用配置）
+get_known_hosts() {
+    grep -E "^Host [^*]" "$HOME/.ssh/config" 2>/dev/null | awk '{print $2}' | sort
+}
+
+# 检测 host 是否通过 ProxyJump/ProxyCommand 依赖另一个 host
+_detect_proxy_dep() {
+    local host="$1"
+    local proxy
+    proxy=$(ssh -G "$host" 2>/dev/null | awk '/^proxyjump /{print $2}')
+    if [[ -n "$proxy" && "$proxy" != "none" ]]; then
+        echo "$proxy"
+        return
+    fi
+    local proxy_cmd
+    proxy_cmd=$(ssh -G "$host" 2>/dev/null | awk '/^proxycommand /{$1=""; print}')
+    if [[ -n "$proxy_cmd" ]]; then
+        # 尝试从 ProxyCommand 中提取 host 名
+        local dep
+        dep=$(echo "$proxy_cmd" | sed -n 's/.*-W %h:%p[[:space:]]\+\([^[:space:]]\+\).*/\1/p; s/.*ssh[[:space:]]\+\([^[:space:]]\+\).*/\1/p' | head -1)
+        [[ -n "$dep" ]] && echo "$dep"
+    fi
+}
+
+# 获取指定 host 的 ControlPath socket 路径
+get_socket_path() {
+    local host="$1"
+    # 从 ssh config 解析实际连接参数，构造 socket 路径
+    local user port hostname
+    user=$(ssh -G "$host" 2>/dev/null | awk '/^user /{print $2}')
+    hostname=$(ssh -G "$host" 2>/dev/null | awk '/^hostname /{print $2}')
+    port=$(ssh -G "$host" 2>/dev/null | awk '/^port /{print $2}')
+    echo "$SOCKET_DIR/${user}@${hostname}-${port}"
+}
+
+# 检查指定 host 的连接状态
+check_connection() {
+    local host="$1"
+    ssh -O check "$host" 2>/dev/null
+}
+
+# ========== 子命令 ==========
+
+cmd_connect() {
+    local host="${1:?用法: nexus connect <host>}"
+
+    # 检查依赖（跳板机场景）
+    local dep
+    dep="$(cfg_get_depends "$host")"
+    if [[ -n "$dep" ]] && ! check_connection "$dep" 2>/dev/null; then
+        echo -e "${YELLOW}${host} 依赖 ${dep}，正在先连接 ${dep}...${NC}"
+        cmd_connect "$dep"
+    fi
+
+    echo -e "${CYAN}正在连接 ${host}...${NC}"
+    echo -e "${YELLOW}请完成认证（可能需要2FA）${NC}"
+
+    ssh -o ControlMaster=yes -S "$(get_socket_path "$host")" -fN "$host"
+
+    if check_connection "$host"; then
+        echo -e "${GREEN}[OK] ${host} 连接已建立，ControlMaster socket 已激活${NC}"
+    else
+        echo -e "${RED}[FAIL] ${host} 连接建立失败${NC}"
+        return 1
+    fi
+}
+
+cmd_disconnect() {
+    local host="${1:?用法: nexus disconnect <host>}"
+    if check_connection "$host"; then
+        ssh -O exit "$host" 2>/dev/null
+        echo -e "${GREEN}[OK] ${host} 连接已关闭${NC}"
+    else
+        echo -e "${YELLOW}${host} 本来就没有活跃连接${NC}"
+    fi
+}
+
+cmd_status() {
+    echo -e "${CYAN}=== NexusEnv 连接状态 ===${NC}"
+    echo ""
+
+    # SSH 连接状态
+    echo -e "${CYAN}[SSH ControlMaster]${NC}"
+    local has_connection=false
+    for host in $(cfg_get_servers); do
+        if check_connection "$host" 2>/dev/null; then
+            echo -e "  ${GREEN}●${NC} ${host} — 已连接"
+            has_connection=true
+        else
+            echo -e "  ${RED}○${NC} ${host} — 未连接"
+        fi
+    done
+    if ! $has_connection; then
+        echo -e "  ${YELLOW}暂无活跃连接。使用 nexus connect <host> 建立连接${NC}"
+    fi
+
+    echo ""
+
+    # SSHFS 挂载状态
+    echo -e "${CYAN}[SSHFS 挂载]${NC}"
+    local has_mount=false
+    if command -v mount &>/dev/null; then
+        while IFS= read -r line; do
+            if [[ "$line" == *"$MOUNT_BASE"* ]]; then
+                echo -e "  ${GREEN}●${NC} $line"
+                has_mount=true
+            fi
+        done < <(mount | grep -i "fuse\|sshfs" 2>/dev/null || true)
+    fi
+    if ! $has_mount; then
+        echo -e "  ${YELLOW}暂无挂载。使用 nexus mount <host> [target] 挂载${NC}"
+    fi
+}
+
+cmd_mount() {
+    local host="${1:?用法: nexus mount <host> [target|remote_path]}"
+    local target="${2:-}"
+
+    # 检查 sshfs 是否可用
+    if ! command -v sshfs &>/dev/null; then
+        echo -e "${RED}sshfs 未安装。请运行 nexus setup 安装依赖${NC}"
+        return 1
+    fi
+
+    # 检查 SSH 连接
+    if ! check_connection "$host"; then
+        echo -e "${YELLOW}${host} 未连接，请先运行: nexus connect ${host}${NC}"
+        return 1
+    fi
+
+    # 判断是 target 名称还是自定义路径
+    if [[ -z "$target" ]]; then
+        # 无参数：挂载配置中的默认目标
+        for t in $(cfg_get_default_mounts "$host"); do
+            local rpath
+            rpath="$(get_remote_path "$host" "$t")"
+            if [[ -n "$rpath" ]]; then
+                _do_mount "$host" "$t" "$rpath"
+            fi
+        done
+        return 0
+    elif [[ "$target" == "all" ]]; then
+        for t in $(get_mount_targets "$host"); do
+            _do_mount "$host" "$t" "$(get_remote_path "$host" "$t")"
+        done
+    elif [[ "$target" == /* ]]; then
+        # 绝对路径 -> 自定义挂载
+        _do_mount "$host" "custom" "$target"
+    else
+        # target 名称（home, workspace, nfs 等）
+        local rpath
+        rpath="$(get_remote_path "$host" "$target")"
+        if [[ -z "$rpath" ]]; then
+            echo -e "${RED}${host} 没有配置 ${target} 路径${NC}"
+            return 1
+        fi
+        _do_mount "$host" "$target" "$rpath"
+    fi
+}
+
+_do_mount() {
+    local host="$1" target="$2" remote_path="$3"
+    local mount_point="$MOUNT_BASE/$host/$target"
+
+    # 检查是否已挂载
+    if mount | grep -q "$mount_point" 2>/dev/null; then
+        echo -e "${YELLOW}[跳过] ${host}:${target} 已挂载在 ${mount_point}${NC}"
+        return 0
+    fi
+
+    mkdir -p "$mount_point"
+
+    # 展开远程 ~ 为实际路径
+    if [[ "$remote_path" == "~" || "$remote_path" == "~/"* ]]; then
+        local remote_home
+        remote_home=$(ssh "$host" 'echo $HOME' 2>/dev/null)
+        if [[ -n "$remote_home" ]]; then
+            remote_path="${remote_path/#\~/$remote_home}"
+        fi
+    fi
+
+    echo -e "${CYAN}挂载 ${host}:${remote_path} -> ${mount_point}${NC}"
+
+    # SSHFS 选项，针对慢速连接优化
+    sshfs "${host}:${remote_path}" "$mount_point" \
+        -o reconnect \
+        -o ServerAliveInterval=15 \
+        -o ServerAliveCountMax=3 \
+        -o follow_symlinks \
+        -o noatime \
+        -o auto_cache \
+        -o Compression=yes
+
+    if mount | grep -q "$mount_point" 2>/dev/null; then
+        echo -e "${GREEN}[OK] ${host}:${remote_path} -> ${mount_point}${NC}"
+    else
+        echo -e "${RED}[FAIL] 挂载失败${NC}"
+        return 1
+    fi
+}
+
+cmd_umount() {
+    local host="${1:?用法: nexus umount <host> [target]}"
+    local target="${2:-}"
+
+    if [[ -n "$target" ]]; then
+        _do_umount "$host" "$target" "$MOUNT_BASE/$host/$target"
+    else
+        # 卸载该 host 下所有挂载
+        local found=false
+        while IFS= read -r line; do
+            if [[ "$line" == *"$MOUNT_BASE/$host"* ]]; then
+                local mp
+                mp=$(echo "$line" | awk '{print $3}')
+                [[ "$(uname)" == "Darwin" ]] && mp=$(echo "$line" | sed 's/.* on //;s/ (.*//')
+                _do_umount "$host" "" "$mp"
+                found=true
+            fi
+        done < <(mount | grep -i "fuse\|sshfs" 2>/dev/null || true)
+        if ! $found; then
+            echo -e "${YELLOW}${host} 没有活跃的挂载${NC}"
+        fi
+    fi
+}
+
+_do_umount() {
+    local host="$1" target="$2" mount_point="$3"
+    local label="${host}"
+    [[ -n "$target" ]] && label="${host}:${target}"
+
+    if ! mount | grep -q "$mount_point" 2>/dev/null; then
+        echo -e "${YELLOW}${label} 未挂载${NC}"
+        return 0
+    fi
+
+    echo -e "${CYAN}卸载 ${mount_point}...${NC}"
+
+    # 多级回退卸载
+    if [[ "$(uname)" == "Darwin" ]]; then
+        umount "$mount_point" 2>/dev/null || \
+        diskutil unmount force "$mount_point" 2>/dev/null || \
+        { echo -e "${RED}[FAIL] 无法卸载 ${label}，尝试: umount -f ${mount_point}${NC}"; return 1; }
+    else
+        fusermount -u "$mount_point" 2>/dev/null || \
+        umount "$mount_point" 2>/dev/null || \
+        fusermount -uz "$mount_point" 2>/dev/null || \
+        umount -l "$mount_point" 2>/dev/null || \
+        { echo -e "${RED}[FAIL] 无法卸载 ${label}${NC}"; return 1; }
+    fi
+
+    echo -e "${GREEN}[OK] ${label} 已卸载${NC}"
+}
+
+cmd_sync() {
+    local host="${1:?用法: nexus sync <host>}"
+
+    if ! command -v rsync &>/dev/null; then
+        echo -e "${RED}rsync 未安装${NC}"
+        return 1
+    fi
+
+    if ! check_connection "$host"; then
+        echo -e "${YELLOW}${host} 未连接，请先运行: nexus connect ${host}${NC}"
+        return 1
+    fi
+
+    local remote_path="~/code/NexusEnv"
+    echo -e "${CYAN}同步 NexusEnv 到 ${host}:${remote_path}${NC}"
+
+    ssh "$host" "mkdir -p $remote_path"
+    rsync -avz --progress \
+        --exclude '.git' \
+        --exclude 'mounts' \
+        --exclude '*.log' \
+        "$SCRIPT_DIR/" "$host:$remote_path/"
+
+    echo -e "${GREEN}[OK] 同步完成。在 ${host} 上运行:${NC}"
+    echo -e "  ${CYAN}cd ${remote_path} && ./setup.sh${NC}"
+}
+
+cmd_health() {
+    echo -e "${CYAN}=== 连接健康检查 ===${NC}"
+    echo ""
+    local all_ok=true
+
+    for host in $(cfg_get_servers); do
+        if ! check_connection "$host" 2>/dev/null; then
+            echo -e "  ${RED}✗${NC} ${host} — 无连接"
+            continue
+        fi
+
+        # 测试连接是否真正可用（超时 5 秒）
+        local start end latency
+        start=$(date +%s%N 2>/dev/null || date +%s)
+        if ssh -o ConnectTimeout=5 "$host" "echo ok" &>/dev/null; then
+            end=$(date +%s%N 2>/dev/null || date +%s)
+            if [[ "$start" =~ ^[0-9]{10,}$ ]]; then
+                latency=$(( (end - start) / 1000000 ))
+                echo -e "  ${GREEN}●${NC} ${host} — 正常 (${latency}ms)"
+            else
+                echo -e "  ${GREEN}●${NC} ${host} — 正常"
+            fi
+        else
+            echo -e "  ${RED}✗${NC} ${host} — socket 存在但连接不可用"
+            all_ok=false
+            # 尝试清理无效 socket
+            echo -e "    ${YELLOW}清理无效 socket...${NC}"
+            ssh -O exit "$host" 2>/dev/null || true
+        fi
+    done
+
+    echo ""
+    if $all_ok; then
+        echo -e "${GREEN}所有连接正常${NC}"
+    else
+        echo -e "${YELLOW}提示: 使用 nexus connect <host> 重建失效连接${NC}"
+    fi
+}
+
+cmd_ssh() {
+    local host="${1:?用法: nexus ssh <host> [command...]}"
+    shift
+
+    # 检查连接，未连接则自动 connect
+    if ! check_connection "$host" 2>/dev/null; then
+        echo -e "${YELLOW}${host} 未连接，正在建立连接...${NC}"
+        cmd_connect "$host"
+    fi
+
+    local workdir
+    workdir="$(cfg_get_ssh_workdir "$host")"
+
+    # ~ 是 ssh 默认目录，无需 cd
+    [[ "$workdir" == "~" ]] && workdir=""
+
+    if [[ $# -gt 0 ]]; then
+        # 执行单条命令
+        if [[ -n "$workdir" ]]; then
+            ssh "$host" "cd '$workdir' && $*"
+        else
+            ssh "$host" "$@"
+        fi
+    else
+        # 交互式 shell
+        echo -e "${CYAN}进入 ${host} (workdir: ${workdir:-~})${NC}"
+        if [[ -n "$workdir" ]]; then
+            ssh -t "$host" "cd '$workdir' && exec \$SHELL -l"
+        else
+            ssh -t "$host"
+        fi
+    fi
+}
+
+cmd_init() {
+    echo -e "${CYAN}=== NexusEnv 初始化 ===${NC}"
+    echo ""
+
+    local config_file="$NEXUS_CONFIG_FILE"
+    if [[ -f "$config_file" ]]; then
+        echo -e "${YELLOW}已存在配置文件: ${config_file}${NC}"
+        read -rp "覆盖? [y/N] " ans
+        [[ "$ans" != [yY]* ]] && { echo "取消。"; return 0; }
+    fi
+
+    # 检测当前用户
+    local user
+    user="$(whoami)"
+    read -rp "远程默认用户名 [${user}]: " input_user
+    user="${input_user:-$user}"
+
+    # 生成配置头
+    cfg_write_config "$config_file" "$user"
+
+    # 扫描 SSH hosts
+    echo ""
+    echo -e "${CYAN}扫描 ~/.ssh/config 中的 Host...${NC}"
+    local hosts
+    hosts=$(get_known_hosts)
+
+    if [[ -z "$hosts" ]]; then
+        echo -e "${YELLOW}未发现 SSH Host 配置${NC}"
+        echo -e "配置文件已生成: ${config_file}"
+        echo -e "请手动添加 [server.xxx] section"
+        return 0
+    fi
+
+    for host in $hosts; do
+        echo ""
+        read -rp "添加 ${host} 到 nexus 配置? [Y/n] " ans
+        [[ "$ans" == [nN]* ]] && continue
+
+        # 检测远程用户
+        local ruser
+        ruser=$(ssh -G "$host" 2>/dev/null | awk '/^user /{print $2}')
+        ruser="${ruser:-$user}"
+
+        # 检测依赖
+        local dep
+        dep="$(_detect_proxy_dep "$host")"
+
+        # 收集额外挂载路径
+        local -a extra_mounts=()
+        echo -e "  ${CYAN}默认已添加 home = ~ (远程 home 目录)${NC}"
+        echo -e "  ${CYAN}如需挂载其他远程目录（如工作目录、共享存储等），请逐个添加:${NC}"
+        while true; do
+            echo ""
+            read -rp "  挂载名称 (如 workspace、nfs，直接回车跳过): " mname
+            [[ -z "$mname" ]] && break
+            read -rp "  远程路径 (如 /data/${ruser}/workspace): " mpath
+            if [[ -z "$mpath" ]]; then
+                echo -e "  ${RED}路径不能为空，请重新输入${NC}"
+                continue
+            fi
+            extra_mounts+=("${mname}=${mpath}")
+            echo -e "  ${GREEN}+${NC} ${mname} = ${mpath} (将挂载到 ~/mnt/${host}/${mname}/)"
+        done
+
+        cfg_append_server "$config_file" "$host" "$ruser" "$dep" "${extra_mounts[@]+"${extra_mounts[@]}"}"
+        echo -e "  ${GREEN}✓${NC} 已添加 ${host} (user=${ruser}${dep:+, depends=${dep}})"
+    done
+
+    echo ""
+    echo -e "${GREEN}配置文件已生成: ${config_file}${NC}"
+    echo -e "请编辑配置文件添加 workspace/nfs 等路径:"
+    echo -e "  ${CYAN}\$EDITOR ${config_file}${NC}"
+}
+
+cmd_setup() {
+    bash "$SCRIPT_DIR/setup.sh"
+}
+
+cmd_help() {
+    cat <<'EOF'
+NexusEnv - 多机办公环境管理工具
+
+用法: nexus <command> [args]
+
+命令:
+  connect <host>                建立 SSH ControlMaster 连接（需要2FA）
+  disconnect <host>             关闭 SSH 连接
+  ssh <host> [command...]       SSH 到服务器（自动 cd 到工作目录）
+  health                        检查连接健康状态（含延迟测量）
+  status                        查看所有连接和挂载状态
+  mount <host> [target|path]    SSHFS 挂载远程目录
+  umount <host> [target]        卸载 SSHFS
+  sync <host>                   同步 NexusEnv 到远程服务器
+  init                          扫描 SSH 配置并生成 nexus 配置文件
+  setup                         初始化安装（依赖 + 配置）
+  help                          显示帮助
+
+挂载目标 (target):
+  <name>     配置文件中定义的目标名（如 home, workspace, nfs）
+  all        挂载该服务器所有已配置目标
+  /path      自定义远程绝对路径
+  (空)       挂载 default_mounts 中指定的目标
+
+示例:
+  nexus connect myserver            # 连接服务器（自动处理跳板机依赖）
+  nexus mount myserver              # 挂载默认目标
+  nexus mount myserver workspace    # 只挂载 workspace
+  nexus mount myserver /tmp         # 挂载自定义路径
+  nexus umount myserver             # 卸载该服务器所有挂载
+  nexus status                  # 查看状态
+
+配置文件: ~/.config/nexus/config
+EOF
+}
+
+# ========== 主入口 ==========
+
+case "${1:-help}" in
+    connect)    shift; cmd_connect "$@" ;;
+    disconnect) shift; cmd_disconnect "$@" ;;
+    ssh)        shift; cmd_ssh "$@" ;;
+    health)     cmd_health ;;
+    status)     cmd_status ;;
+    mount)      shift; cmd_mount "$@" ;;
+    umount)     shift; cmd_umount "$@" ;;
+    sync)       shift; cmd_sync "$@" ;;
+    init)       cmd_init ;;
+    setup)      cmd_setup ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        echo -e "${RED}未知命令: $1${NC}"
+        cmd_help
+        exit 1
+        ;;
+esac
