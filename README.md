@@ -1,25 +1,20 @@
 # NexusEnv
 
-多机办公环境管理工具。通过 SSH ControlMaster 复用连接 + SSHFS 挂载远程文件系统，一次 2FA 认证后即可自由操作多台服务器。
+多机办公环境管理工具。基于 SSH ControlMaster + SSHFS：一次完成 2FA，后续 `ssh` / `sshfs` / `rsync` 复用连接。
 
-## 功能
+## 适合什么场景
 
-- **连接管理** — SSH ControlMaster 复用，一次认证多次使用
-- **跳板机支持** — 自动检测 ProxyJump 依赖，递归建立连接链
-- **文件挂载** — SSHFS 挂载远程目录到本地 `~/mnt/<host>/<target>/`
-- **多目标挂载** — 每个服务器可配置多个远程路径（home、workspace、nfs 等）
-- **配置驱动** — INI 格式配置文件，新增服务器只需编辑配置
-- **交互式初始化** — 扫描 `~/.ssh/config` 自动生成配置，支持自定义挂载路径
-- **健康检查** — 连接状态监测 + 延迟测量 + 无效 socket 自动清理
+- 管理多台远程服务器
+- 需要跳板机 / ProxyJump
+- 希望把远程目录挂到本地开发
+- 在本地运行 Claude Code，但直接操作远程项目
 
 ## 安装
 
-### 前置条件
+前提：
 
-- `~/.ssh/config` 中已配置好你的服务器 Host
-- Bash 4.0+
-
-### 安装步骤
+- `~/.ssh/config` 已配置好目标主机
+- Bash 4+
 
 ```bash
 git clone https://github.com/YOUR_USER/NexusEnv.git ~/NexusEnv
@@ -27,75 +22,75 @@ cd ~/NexusEnv
 ./setup.sh
 ```
 
-setup.sh 会自动完成：
+`setup.sh` 会：
 
-1. 安装 SSHFS 依赖（macOS: macFUSE + sshfs-mac，Linux: apt/yum/dnf）
-2. 配置 SSH ControlMaster（追加到 `~/.ssh/config`）
-3. 创建挂载点目录 `~/mnt/`
-4. 运行 `./nexus init` 交互式生成配置文件
+1. 安装 SSHFS 依赖
+2. 配置 SSH ControlMaster
+3. 创建 `~/mnt/`
+4. 运行 `./nexus init` 生成配置
 5. 链接 `nexus` 到 `~/.local/bin/`
 
-安装后确保 `~/.local/bin` 在 PATH 中：
+如果 `~/.local/bin` 不在 PATH 中：
 
 ```bash
-# 添加到 ~/.zshrc 或 ~/.bashrc
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ## 快速开始
 
-### 1. 初始化配置
+### 1. 初始化
 
 ```bash
 ./nexus init
 ```
 
-交互式引导你完成配置：
+初始化时会交互式询问：
 
-```
-远程默认用户名 [john]: john
+- 默认远程用户名
+- 连接保持时间 `control_persist`（秒）
+- 每台主机的类型：`cloud` / `slurm`
+- 需要挂载的额外远程目录
 
-扫描 ~/.ssh/config 中的 Host...
-
-添加 myserver 到 nexus 配置? [Y/n] Y
-  服务器类型:
-    1) cloud  — 普通云服务器（有 sudo 权限）
-    2) slurm  — Slurm 集群（GPU 任务通过 sbatch 提交）
-  选择 [1]: 1
-  默认已添加 home = ~ (远程 home 目录)
-  如需挂载其他远程目录（如工作目录、共享存储等），请逐个添加:
-
-  挂载名称 (如 workspace、nfs，直接回车跳过): workspace
-  远程路径 (如 /data/john/workspace): /data/workspace
-  + workspace = /data/workspace (将挂载到 ~/mnt/myserver/workspace/)
-
-  挂载名称 (如 workspace、nfs，直接回车跳过):
-  ✓ 已添加 myserver (type=cloud, user=john)
-```
-
-- `home = ~` 自动添加，`~` 会在挂载时解析为远程服务器的实际 home 路径
-- 挂载名称和远程路径分两步输入，更清晰
-- 可以添加任意多个额外挂载目标，直接回车跳过即完成当前服务器
-
-### 2. 连接并使用
+### 2. 连接、挂载、进入
 
 ```bash
-./nexus connect myserver     # 建立 SSH 连接（完成 2FA 认证）
-./nexus mount myserver       # 挂载远程文件到本地
-./nexus ssh myserver         # SSH 到服务器（自动 cd 到工作目录）
-./nexus status               # 查看所有连接和挂载状态
+./nexus connect myserver
+./nexus mount myserver
+./nexus ssh myserver
+./nexus status
 ```
 
-### 3. 挂载后的目录结构
+挂载后目录位于：
 
-```
-~/mnt/myserver/
-├── home/                  ← 远程 home 目录
-├── workspace/             ← 远程 /data/workspace
-└── nfs/                   ← 远程 /nfs_shared/data（如有配置）
+```text
+~/mnt/myserver/home/
+~/mnt/myserver/workspace/
+~/mnt/myserver/nfs/
 ```
 
-挂载后远程文件就像本地文件一样操作，可以直接用编辑器打开。
+### 3. 后续新增主机
+
+```bash
+./nexus add myserver
+./nexus add
+```
+
+- 传 host：添加指定主机
+- 不传：扫描 `~/.ssh/config` 中未配置的主机
+
+### 4. 调整连接保持时间
+
+```bash
+./nexus set-timeout 43200
+./nexus set-timeout
+```
+
+说明：
+
+- 单位是秒
+- 默认值是 `14400`（4 小时）
+- 新值会在下次 `./nexus connect <host>` 时生效
+- 已经存在的连接不会被强制更新；如需立即生效，先 `disconnect` 再 `connect`
 
 ## 命令参考
 
@@ -104,27 +99,29 @@ export PATH="$HOME/.local/bin:$PATH"
 | `./nexus connect <host>` | 建立 SSH 连接（需要 2FA） |
 | `./nexus disconnect <host>` | 关闭 SSH 连接 |
 | `./nexus ssh <host> [cmd...]` | SSH 到服务器，支持交互式或单条命令 |
-| `./nexus mount <host> [target]` | SSHFS 挂载远程目录 |
-| `./nexus umount <host> [target]` | 卸载 SSHFS 挂载 |
-| `./nexus status` | 查看所有连接和挂载状态 |
-| `./nexus health` | 连接健康检查（含延迟测量） |
-| `./nexus claude <host> <path>` | 为远程项目生成 Claude Code 配置 |
+| `./nexus mount <host> [target]` | 挂载远程目录 |
+| `./nexus umount <host> [target]` | 卸载挂载 |
+| `./nexus status` | 查看连接和挂载状态 |
+| `./nexus health` | 连接健康检查 |
+| `./nexus claude <host> <path>` | 为远程项目生成 CLAUDE.md |
 | `./nexus sync <host>` | 同步 NexusEnv 到远程服务器 |
+| `./nexus add [host]` | 添加服务器到已有配置 |
+| `./nexus set-timeout [seconds]` | 设置连接保持时间 |
 | `./nexus init` | 扫描 SSH 配置并生成 nexus 配置 |
 | `./nexus setup` | 运行完整安装流程 |
 
-### 挂载选项
+挂载补充：
 
 ```bash
-./nexus mount myserver              # 挂载 default_mounts 中的目标
-./nexus mount myserver workspace    # 只挂载 workspace
-./nexus mount myserver all          # 挂载所有已配置目标
+./nexus mount myserver              # 挂载 default_mounts
+./nexus mount myserver workspace    # 只挂载某个 target
+./nexus mount myserver all          # 挂载所有 target
 ./nexus mount myserver /tmp         # 挂载自定义远程绝对路径
 ```
 
 ## 配置文件
 
-路径：`~/.config/nexus/config`（INI 格式，由 `./nexus init` 交互生成，也可手动编辑）
+路径：`~/.config/nexus/config`
 
 ```ini
 [general]
@@ -137,139 +134,64 @@ control_persist = 14400
 type = cloud
 home = ~
 workspace = /data/workspace
-nfs = /nfs_shared/data
-default_mounts = home, workspace, nfs
+default_mounts = home, workspace
 ssh_workdir = /data/workspace
 depends =
-
-[server.internal]
-type = slurm
-home = ~
-default_mounts = home
-ssh_workdir = ~
-# 通过 myserver 跳板连接
-depends = myserver
 ```
 
-### 配置字段说明
+字段说明：
 
 | 字段 | 说明 |
 |------|------|
-| `type` | 服务器类型：`cloud`（普通云服务器）或 `slurm`（Slurm 集群） |
-| `home`, `workspace`, `nfs`, ... | 远程路径（key 即挂载目标名，`~` 表示远程 home） |
-| `default_mounts` | `./nexus mount <host>` 无参数时挂载的目标（逗号分隔） |
-| `ssh_workdir` | `./nexus ssh` 自动 cd 的目录 |
-| `depends` | 连接前需要先连接的跳板机（用于 ProxyJump 场景） |
+| `control_persist` | SSH 主连接保持时间，单位秒 |
+| `type` | `cloud` 或 `slurm` |
+| `home`, `workspace`, `nfs`, ... | 远程路径；`~` 表示远程 home |
+| `default_mounts` | `mount` 无参数时默认挂载哪些目标 |
+| `ssh_workdir` | `nexus ssh` 默认进入的目录 |
+| `depends` | 依赖的跳板机 |
 
-### 关于 `~` 路径
+## Claude Code 工作流
 
-配置中的 `~` 会在挂载时自动解析为远程服务器的实际 home 路径（通过 `ssh <host> 'echo $HOME'`）。这意味着即使不同服务器的 home 路径不同（如 `/home/john`、`/home/S/john`），配置里统一写 `~` 即可。
-
-## 最佳实践
-
-### 挂载远程项目到本机开发
-
-SSHFS 挂载后，远程文件在本地以普通文件形式存在，可以直接用本地编辑器和工具操作：
+远程项目挂载到本地后，可以直接用本地 Claude Code 开发：
 
 ```bash
-# 1. 连接服务器
-./nexus connect myserver
-
-# 2. 挂载远程文件系统
-./nexus mount myserver
-
-# 3. 用本地编辑器直接打开远程项目
-code ~/mnt/myserver/workspace/my-project
-# 或
-vim ~/mnt/myserver/workspace/my-project/main.py
-```
-
-挂载后的目录结构就像本地文件一样，所有编辑都会实时同步到远程服务器。
-
-### 用本地 Claude Code 开发远程项目
-
-NexusEnv 的核心场景之一：**在本地运行 Claude Code，直接开发挂载到本地的远程项目**。这样既能享受本地 Claude Code 的交互体验，又能操作远程服务器上的代码和环境。
-
-**步骤：**
-
-```bash
-# 1. 确保连接和挂载就绪
 ./nexus connect myserver
 ./nexus mount myserver
-
-# 2. 一键生成 CLAUDE.md（自动填充服务器信息，根据类型选择模板）
 ./nexus claude myserver /data/workspace/my-project
-
-# 3. 进入挂载目录，启动 Claude Code
 cd ~/mnt/myserver/workspace/my-project
 claude
 ```
 
-`nexus claude` 会根据配置中的服务器类型（`type = cloud` 或 `type = slurm`）自动选择对应模板，填充服务器地址、远程路径等信息，生成 CLAUDE.md 到本地挂载目录。
+此时：
 
-**生成的 CLAUDE.md 告诉 Claude Code：**
-
-- 文件读写直接操作挂载目录即可，改动实时同步
-- 命令执行必须通过 SSH：`ssh myserver "cd /path && command"`
-- cloud 类型：可以 sudo 安装包、管理服务、操作 Docker
-- slurm 类型：计算任务必须通过 sbatch/srun 提交，不要在登录节点跑 GPU 任务
-
-**实际效果：**
-
-- Claude Code 读写文件 → 直接操作挂载目录，实时同步到远程
-- Claude Code 运行命令 → 通过 SSH ControlMaster 复用连接，无需认证
-- Claude Code 查看日志/调试 → `ssh myserver "tail -f /path/to/log"`
+- 文件编辑直接作用于挂载目录
+- 命令通过 `ssh myserver "..."` 执行
+- 无需重复认证，因为会复用已建立的 ControlMaster 连接
 
 ## 工作原理
 
-```
-./nexus connect myserver
-  ↓
-SSH ControlMaster 建立持久连接 → ~/.ssh/sockets/<user>@<host>-<port>
-  ↓
-后续所有操作（ssh / sshfs / rsync）自动复用该连接，无需再次认证
-  ↓
-ControlPersist 保持连接 4 小时（可配置），超时后需重新 connect
+```text
+nexus connect <host>
+  -> 建立 ControlMaster 主连接
+  -> socket 保存在 ~/.ssh/sockets/
+  -> 后续 ssh / sshfs / rsync 自动复用
+  -> 超时时间由 control_persist 控制
 ```
 
-### 跳板机
+如果配置了：
 
-配置 `depends = jumphost` 后，`./nexus connect` 会自动先连接跳板机：
-
-```bash
-./nexus connect internal
-# 自动检测 depends = myserver
-# → 先连接 myserver（如果未连接）
-# → 再连接 internal
+```ini
+depends = jumphost
 ```
+
+那么 `nexus connect internal` 会先连接跳板机，再连接目标主机。
 
 ## 依赖
 
-- Bash 4.0+（需要关联数组支持）
-- OpenSSH（ssh, ssh-keygen）
-- SSHFS（macOS: macFUSE + sshfs-mac，Linux: sshfs）
-- rsync（仅 `./nexus sync` 需要）
-
-## 平台支持
-
-- macOS（通过 Homebrew 安装依赖）
-- Linux（Ubuntu/Debian, CentOS/RHEL, Fedora）
-
-## 项目结构
-
-```
-NexusEnv/
-├── nexus                 # 主命令行工具
-├── setup.sh              # 安装脚本
-├── lib/
-│   └── config.sh         # INI 配置解析库
-├── config/
-│   ├── example.conf      # 配置文件示例
-│   └── ssh_controlmaster.conf  # SSH ControlMaster 配置模板
-└── templates/
-    ├── claude-cloud.md   # 云服务器 Claude Code 模板
-    └── claude-slurm.md   # Slurm 集群 Claude Code 模板
-```
+- Bash 4+
+- OpenSSH
+- SSHFS
+- rsync（仅 `sync` 使用）
 
 ## License
 

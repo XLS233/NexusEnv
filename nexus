@@ -85,10 +85,65 @@ check_connection() {
     ssh -O check "$host" 2>/dev/null
 }
 
+# 更新 general section 中的 control_persist
+set_control_persist() {
+    local config_file="$1" persist="$2"
+    python3 - "$config_file" "$persist" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+persist = sys.argv[2]
+lines = path.read_text().splitlines()
+out = []
+in_general = False
+updated = False
+inserted = False
+
+for line in lines:
+    stripped = line.strip()
+    if stripped.startswith('[') and stripped.endswith(']'):
+        if in_general and not updated:
+            out.append(f'control_persist = {persist}')
+            updated = True
+            inserted = True
+        in_general = stripped == '[general]'
+        out.append(line)
+        continue
+
+    if in_general and stripped.startswith('control_persist ='):
+        if not updated:
+            out.append(f'control_persist = {persist}')
+            updated = True
+        continue
+
+    out.append(line)
+
+if in_general and not updated:
+    out.append(f'control_persist = {persist}')
+    inserted = True
+
+if not any(line.strip() == '[general]' for line in lines):
+    if out and out[-1] != '':
+        out.append('')
+    out.extend(['[general]', f'control_persist = {persist}'])
+    inserted = True
+
+path.write_text('\n'.join(out) + '\n')
+PY
+}
+
+validate_control_persist() {
+    local value="$1"
+    [[ "$value" =~ ^[1-9][0-9]*$ ]]
+}
+
 # ========== 子命令 ==========
 
 cmd_connect() {
     local host="${1:?用法: nexus connect <host>}"
+    local persist
+    persist="$(cfg_control_persist)"
 
     # 检查依赖（跳板机场景）
     local dep
@@ -101,7 +156,7 @@ cmd_connect() {
     echo -e "${CYAN}正在连接 ${host}...${NC}"
     echo -e "${YELLOW}请完成认证（可能需要2FA）${NC}"
 
-    ssh -o ControlMaster=yes -S "$(get_socket_path "$host")" -fN "$host"
+    ssh -o ControlMaster=yes -o ControlPersist="$persist" -S "$(get_socket_path "$host")" -fN "$host"
 
     if check_connection "$host"; then
         echo -e "${GREEN}[OK] ${host} 连接已建立，ControlMaster socket 已激活${NC}"
@@ -481,6 +536,132 @@ cmd_claude() {
     echo -e "  ${CYAN}cd $(dirname "$output_file") && claude${NC}"
 }
 
+# 交互式添加单个服务器到配置文件
+# 用法: _interactive_add_server <host> <config_file> <default_user>
+_interactive_add_server() {
+    local host="$1" config_file="$2" default_user="$3"
+
+    # 检测远程用户
+    local ruser
+    ruser=$(ssh -G "$host" 2>/dev/null | awk '/^user /{print $2}')
+    ruser="${ruser:-$default_user}"
+
+    # 检测依赖
+    local dep
+    dep="$(_detect_proxy_dep "$host")"
+
+    # 选择服务器类型
+    local stype="cloud"
+    echo -e "  ${CYAN}服务器类型:${NC}"
+    echo -e "    1) cloud  — 普通云服务器（有 sudo 权限）"
+    echo -e "    2) slurm  — Slurm 集群（GPU 任务通过 sbatch 提交）"
+    read -rp "  选择 [1]: " type_choice
+    case "${type_choice:-1}" in
+        2|slurm) stype="slurm" ;;
+        *) stype="cloud" ;;
+    esac
+
+    # 收集额外挂载路径
+    local -a extra_mounts=()
+    echo -e "  ${CYAN}默认已添加 home = ~ (远程 home 目录)${NC}"
+    echo -e "  ${CYAN}如需挂载其他远程目录（如工作目录、共享存储等），请逐个添加:${NC}"
+    while true; do
+        echo ""
+        read -rp "  挂载名称 (如 workspace、nfs，直接回车跳过): " mname
+        [[ -z "$mname" ]] && break
+        read -rp "  远程路径 (如 /data/${ruser}/workspace): " mpath
+        if [[ -z "$mpath" ]]; then
+            echo -e "  ${RED}路径不能为空，请重新输入${NC}"
+            continue
+        fi
+        extra_mounts+=("${mname}=${mpath}")
+        echo -e "  ${GREEN}+${NC} ${mname} = ${mpath} (将挂载到 ~/mnt/${host}/${mname}/)"
+    done
+
+    cfg_append_server "$config_file" "$host" "$ruser" "$dep" "$stype" "${extra_mounts[@]+"${extra_mounts[@]}"}"
+    echo -e "  ${GREEN}✓${NC} 已添加 ${host} (type=${stype}, user=${ruser}${dep:+, depends=${dep}})"
+}
+
+cmd_add() {
+    local host="${1:-}"
+    local config_file="$NEXUS_CONFIG_FILE"
+
+    # 确保配置文件存在
+    if [[ ! -f "$config_file" ]]; then
+        echo -e "${RED}未找到配置文件，请先运行: nexus init${NC}"
+        return 1
+    fi
+
+    local default_user
+    default_user="$(cfg_get general default_user "$(whoami)")"
+
+    if [[ -n "$host" ]]; then
+        # 指定 host 模式
+        if cfg_has_server "$host"; then
+            echo -e "${YELLOW}${host} 已存在于配置中${NC}"
+            read -rp "重新配置? [y/N] " ans
+            [[ "$ans" != [yY]* ]] && { echo "取消。"; return 0; }
+        fi
+        echo ""
+        _interactive_add_server "$host" "$config_file" "$default_user"
+    else
+        # 无参数：列出未配置的 host
+        echo -e "${CYAN}扫描 ~/.ssh/config 中未配置的 Host...${NC}"
+        local hosts
+        hosts=$(get_known_hosts)
+
+        if [[ -z "$hosts" ]]; then
+            echo -e "${YELLOW}未发现 SSH Host 配置${NC}"
+            return 0
+        fi
+
+        local found=false
+        for h in $hosts; do
+            cfg_has_server "$h" && continue
+            found=true
+            echo ""
+            read -rp "添加 ${h} 到 nexus 配置? [Y/n] " ans
+            [[ "$ans" == [nN]* ]] && continue
+            _interactive_add_server "$h" "$config_file" "$default_user"
+        done
+
+        if ! $found; then
+            echo -e "${GREEN}所有 SSH Host 均已配置${NC}"
+        fi
+    fi
+
+    # 重新加载配置
+    cfg_load
+    echo ""
+    echo -e "${GREEN}配置已更新: ${config_file}${NC}"
+}
+
+cmd_set_timeout() {
+    local config_file="$NEXUS_CONFIG_FILE"
+    if [[ ! -f "$config_file" ]]; then
+        echo -e "${RED}未找到配置文件，请先运行: nexus init${NC}"
+        return 1
+    fi
+
+    local persist="${1:-}"
+    if [[ -z "$persist" ]]; then
+        local current
+        current="$(cfg_control_persist)"
+        read -rp "连接保持时间（秒）[${current}]: " persist
+        persist="${persist:-$current}"
+    fi
+
+    if ! validate_control_persist "$persist"; then
+        echo -e "${RED}control_persist 必须是正整数秒数${NC}"
+        return 1
+    fi
+
+    set_control_persist "$config_file" "$persist"
+    cfg_load
+    echo -e "${GREEN}已更新 control_persist = ${persist}${NC}"
+    echo -e "${YELLOW}新设置会在下次 nexus connect 建立连接时生效；已存在连接不受影响${NC}"
+}
+
 cmd_init() {
     echo -e "${CYAN}=== NexusEnv 初始化 ===${NC}"
     echo ""
@@ -498,8 +679,16 @@ cmd_init() {
     read -rp "远程默认用户名 [${user}]: " input_user
     user="${input_user:-$user}"
 
+    local control_persist="14400"
+    read -rp "连接保持时间（秒）[${control_persist}]: " input_persist
+    control_persist="${input_persist:-$control_persist}"
+    if ! validate_control_persist "$control_persist"; then
+        echo -e "${RED}control_persist 必须是正整数秒数${NC}"
+        return 1
+    fi
+
     # 生成配置头
-    cfg_write_config "$config_file" "$user"
+    cfg_write_config "$config_file" "$user" "$control_persist"
 
     # 扫描 SSH hosts
     echo ""
@@ -518,46 +707,7 @@ cmd_init() {
         echo ""
         read -rp "添加 ${host} 到 nexus 配置? [Y/n] " ans
         [[ "$ans" == [nN]* ]] && continue
-
-        # 检测远程用户
-        local ruser
-        ruser=$(ssh -G "$host" 2>/dev/null | awk '/^user /{print $2}')
-        ruser="${ruser:-$user}"
-
-        # 检测依赖
-        local dep
-        dep="$(_detect_proxy_dep "$host")"
-
-        # 选择服务器类型
-        local stype="cloud"
-        echo -e "  ${CYAN}服务器类型:${NC}"
-        echo -e "    1) cloud  — 普通云服务器（有 sudo 权限）"
-        echo -e "    2) slurm  — Slurm 集群（GPU 任务通过 sbatch 提交）"
-        read -rp "  选择 [1]: " type_choice
-        case "${type_choice:-1}" in
-            2|slurm) stype="slurm" ;;
-            *) stype="cloud" ;;
-        esac
-
-        # 收集额外挂载路径
-        local -a extra_mounts=()
-        echo -e "  ${CYAN}默认已添加 home = ~ (远程 home 目录)${NC}"
-        echo -e "  ${CYAN}如需挂载其他远程目录（如工作目录、共享存储等），请逐个添加:${NC}"
-        while true; do
-            echo ""
-            read -rp "  挂载名称 (如 workspace、nfs，直接回车跳过): " mname
-            [[ -z "$mname" ]] && break
-            read -rp "  远程路径 (如 /data/${ruser}/workspace): " mpath
-            if [[ -z "$mpath" ]]; then
-                echo -e "  ${RED}路径不能为空，请重新输入${NC}"
-                continue
-            fi
-            extra_mounts+=("${mname}=${mpath}")
-            echo -e "  ${GREEN}+${NC} ${mname} = ${mpath} (将挂载到 ~/mnt/${host}/${mname}/)"
-        done
-
-        cfg_append_server "$config_file" "$host" "$ruser" "$dep" "$stype" "${extra_mounts[@]+"${extra_mounts[@]}"}"
-        echo -e "  ${GREEN}✓${NC} 已添加 ${host} (type=${stype}, user=${ruser}${dep:+, depends=${dep}})"
+        _interactive_add_server "$host" "$config_file" "$user"
     done
 
     echo ""
@@ -586,6 +736,8 @@ NexusEnv - 多机办公环境管理工具
   umount <host> [target]        卸载 SSHFS
   claude <host> <project_path>  为远程项目生成 Claude Code 配置文件
   sync <host>                   同步 NexusEnv 到远程服务器
+  add [host]                    添加服务器到已有配置（不指定则列出未配置的）
+  set-timeout [seconds]         设置连接保持时间（control_persist）
   init                          扫描 SSH 配置并生成 nexus 配置文件
   setup                         初始化安装（依赖 + 配置）
   help                          显示帮助
@@ -621,6 +773,8 @@ case "${1:-help}" in
     umount)     shift; cmd_umount "$@" ;;
     claude)     shift; cmd_claude "$@" ;;
     sync)       shift; cmd_sync "$@" ;;
+    add)        shift; cmd_add "$@" ;;
+    set-timeout) shift; cmd_set_timeout "$@" ;;
     init)       cmd_init ;;
     setup)      cmd_setup ;;
     help|--help|-h) cmd_help ;;

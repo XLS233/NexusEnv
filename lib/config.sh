@@ -172,6 +172,13 @@ cfg_get_depends() {
     cfg_get "server.${server}" depends ""
 }
 
+# 检查服务器是否已配置
+# 用法: cfg_has_server <server> -> 0 (存在) 或 1 (不存在)
+cfg_has_server() {
+    local server="$1"
+    [[ -n "${_CFG["server.${server}.type"]:-}" ]]
+}
+
 # 获取服务器类型
 # 用法: cfg_get_type <server> -> "cloud" 或 "slurm"
 cfg_get_type() {
@@ -222,12 +229,12 @@ cfg_ensure_loaded() {
 # ===== 配置写入 =====
 
 # 生成配置文件
-# 用法: cfg_write_config <output_file> <servers_array_name>
-# servers 数组元素格式: "name:user:hostname"
+# 用法: cfg_write_config <output_file> [default_user] [control_persist]
 cfg_write_config() {
     local output="$1"
     shift
     local user="${1:-$(whoami)}"
+    local control_persist="${2:-14400}"
 
     mkdir -p "$(dirname "$output")"
 
@@ -240,7 +247,7 @@ cfg_write_config() {
 default_user = ${user}
 mount_base = ~/mnt
 socket_dir = ~/.ssh/sockets
-control_persist = 14400
+control_persist = ${control_persist}
 
 HEADER
 
