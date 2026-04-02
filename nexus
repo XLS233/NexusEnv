@@ -44,6 +44,14 @@ get_mount_targets() {
     cfg_get_mount_targets "$server"
 }
 
+normalize_remote_path() {
+    local path="$1"
+    if [[ "$path" != "/" ]]; then
+        path="${path%/}"
+    fi
+    echo "$path"
+}
+
 # 从 ~/.ssh/config 中提取已定义的 Host（排除通配符和通用配置）
 get_known_hosts() {
     grep -E "^Host [^*]" "$HOME/.ssh/config" 2>/dev/null | awk '{print $2}' | sort
@@ -1010,9 +1018,11 @@ generate_agent_doc() {
             [[ -n "$remote_home" ]] && resolved_remote_path="${resolved_remote_path/#\~/$remote_home}"
         fi
     fi
+    resolved_remote_path="$(normalize_remote_path "$resolved_remote_path")"
 
     local local_mount=""
     local output_file=""
+    local best_rpath=""
     for target in $(get_mount_targets "$host") home; do
         local rpath
         rpath="$(get_remote_path "$host" "$target")"
@@ -1025,11 +1035,14 @@ generate_agent_doc() {
                 [[ -n "$remote_home" ]] && rpath="${rpath/#\~/$remote_home}"
             fi
         fi
+        rpath="$(normalize_remote_path "$rpath")"
 
-        if [[ "$resolved_remote_path" == "$rpath"* ]]; then
-            local relative="${resolved_remote_path#"$rpath"}"
-            local_mount="${mp}${relative}"
-            break
+        if [[ "$resolved_remote_path" == "$rpath" || "$resolved_remote_path" == "$rpath/"* ]]; then
+            if [[ -z "$best_rpath" || ${#rpath} -gt ${#best_rpath} ]]; then
+                local relative="${resolved_remote_path#"$rpath"}"
+                local_mount="${mp}${relative}"
+                best_rpath="$rpath"
+            fi
         fi
     done
 
