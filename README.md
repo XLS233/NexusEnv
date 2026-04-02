@@ -106,6 +106,10 @@ nexus set-timeout
 - 新值会在下次 `nexus connect <host>` 时生效
 - `nexus disconnect <host>` 会先自动卸载该 host 的挂载，再关闭连接
 - 已经存在的连接不会被强制更新；如需立即生效，先 `disconnect` 再 `connect`
+- 远程服务器断开或关机后，操作系统可能仍暂时保留 SSHFS 挂载记录；`nexus status` 会将其标记为“挂载残留，后端不可达”，此时先执行 `nexus umount <host>` 再继续操作
+- 若启用了 watcher，成功挂载后会自动启动轮询；只有存在挂载时才运行，若 host 持续不可达超过 `watcher_grace`，会自动卸载对应挂载
+- 成功挂载后会记录 restore intent；若之后因为本地重启、睡眠或 watcher 自动卸载导致挂载消失，可用 `nexus restore [host]` 快速恢复
+- 显式 `nexus umount` / `nexus disconnect` 会清除对应的 restore intent；watcher 自动卸载不会清除
 
 ## 命令参考
 
@@ -118,6 +122,8 @@ nexus set-timeout
 | `nexus umount <host> [target]` | 卸载挂载 |
 | `nexus status` | 查看连接和挂载状态 |
 | `nexus health` | 连接健康检查 |
+| `nexus restore [host|action]` | 恢复或管理之前记录的挂载 |
+| `nexus watcher <action>` | 管理 stale SSHFS 自动清理 watcher |
 | `nexus claude <host> <path>` | 为远程项目生成 CLAUDE.md |
 | `nexus codex <host> <path>` | 为远程项目生成 AGENTS.md |
 | `nexus sync <host>` | 同步 NexusEnv 到远程服务器 |
@@ -133,6 +139,10 @@ nexus mount myserver              # 挂载 default_mounts
 nexus mount myserver workspace    # 只挂载某个 target
 nexus mount myserver all          # 挂载所有 target
 nexus mount myserver /tmp         # 挂载自定义远程绝对路径
+nexus restore                     # 恢复之前记录的挂载
+nexus restore status              # 查看恢复记录
+nexus watcher status              # 查看 watcher 是否运行
+nexus watcher stop                # 手动停止 watcher
 ```
 
 ## 配置文件
@@ -145,6 +155,10 @@ default_user = john
 mount_base = ~/mnt
 socket_dir = ~/.ssh/sockets
 control_persist = 14400
+watcher_enabled = false
+watcher_interval = 5
+watcher_grace = 10
+watcher_state_dir = ~/.local/state/nexus
 # 或永久保持连接
 # control_persist = yes
 
@@ -162,6 +176,10 @@ depends =
 | 字段 | 说明 |
 |------|------|
 | `control_persist` | SSH 主连接保持时间，单位秒；也可设为 `yes` 表示永久保持 |
+| `watcher_enabled` | 是否启用自动检测并清理 stale SSHFS 挂载 |
+| `watcher_interval` | watcher 轮询间隔（秒） |
+| `watcher_grace` | host 持续不可达多久后自动卸载挂载 |
+| `watcher_state_dir` | watcher 与 restore 的本地状态目录 |
 | `type` | `cloud` 或 `slurm` |
 | `home`, `workspace`, `nfs`, ... | 远程路径；`~` 表示远程 home |
 | `default_mounts` | `mount` 无参数时默认挂载哪些目标 |

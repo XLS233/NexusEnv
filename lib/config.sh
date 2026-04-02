@@ -212,6 +212,28 @@ cfg_control_persist() {
     cfg_get general control_persist 14400
 }
 
+# 获取 watcher 启用状态
+cfg_watcher_enabled() {
+    local value
+    value="$(cfg_get general watcher_enabled false)"
+    [[ "$value" == "true" || "$value" == "yes" || "$value" == "1" ]]
+}
+
+# 获取 watcher 轮询间隔（秒）
+cfg_watcher_interval() {
+    cfg_get general watcher_interval 5
+}
+
+# 获取 watcher 宽限时间（秒）
+cfg_watcher_grace() {
+    cfg_get general watcher_grace 10
+}
+
+# 获取 watcher 状态目录
+cfg_watcher_state_dir() {
+    cfg_get general watcher_state_dir "${XDG_STATE_HOME:-$HOME/.local/state}/nexus"
+}
+
 # ===== 确保配置已加载 =====
 
 # 检查配置是否存在并加载
@@ -229,12 +251,16 @@ cfg_ensure_loaded() {
 # ===== 配置写入 =====
 
 # 生成配置文件
-# 用法: cfg_write_config <output_file> [default_user] [control_persist]
+# 用法: cfg_write_config <output_file> [default_user] [control_persist] [watcher_enabled] [watcher_interval] [watcher_grace] [watcher_state_dir]
 cfg_write_config() {
     local output="$1"
     shift
     local user="${1:-$(whoami)}"
     local control_persist="${2:-14400}"
+    local watcher_enabled="${3:-false}"
+    local watcher_interval="${4:-5}"
+    local watcher_grace="${5:-10}"
+    local watcher_state_dir="${6:-~/.local/state/nexus}"
 
     mkdir -p "$(dirname "$output")"
 
@@ -248,6 +274,10 @@ default_user = ${user}
 mount_base = ~/mnt
 socket_dir = ~/.ssh/sockets
 control_persist = ${control_persist}
+watcher_enabled = ${watcher_enabled}
+watcher_interval = ${watcher_interval}
+watcher_grace = ${watcher_grace}
+watcher_state_dir = ${watcher_state_dir}
 
 HEADER
 

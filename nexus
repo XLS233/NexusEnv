@@ -98,6 +98,398 @@ cleanup_stale_socket() {
     return 1
 }
 
+list_nexus_mounts() {
+    command -v mount &>/dev/null || return 0
+
+    while IFS= read -r line; do
+        [[ "$line" == *"$MOUNT_BASE"* ]] || continue
+
+        local mount_point=""
+        if [[ "$(uname)" == "Darwin" ]]; then
+            mount_point=$(echo "$line" | sed 's/.* on //;s/ (.*//')
+        else
+            mount_point=$(echo "$line" | awk '{print $3}')
+        fi
+
+        [[ "$mount_point" == "$MOUNT_BASE"/* ]] || continue
+
+        local remainder="${mount_point#"$MOUNT_BASE/"}"
+        local host="${remainder%%/*}"
+        local target="${remainder#"$host"}"
+        target="${target#/}"
+
+        printf '%s\t%s\t%s\n' "$host" "$target" "$mount_point"
+    done < <(mount | grep -i "fuse\|sshfs" 2>/dev/null || true)
+}
+
+host_has_mounts() {
+    local host="$1"
+
+    while IFS=$'\t' read -r mount_host _ mount_point; do
+        if [[ "$mount_host" == "$host" ]] && [[ -n "$mount_point" ]]; then
+            return 0
+        fi
+    done < <(list_nexus_mounts)
+
+    return 1
+}
+
+watcher_state_dir() {
+    cfg_watcher_state_dir
+}
+
+watcher_pid_file() {
+    echo "$(watcher_state_dir)/watcher.pid"
+}
+
+watcher_stale_dir() {
+    echo "$(watcher_state_dir)/stale"
+}
+
+watcher_notice_dir() {
+    echo "$(watcher_state_dir)/notice"
+}
+
+watcher_event_log() {
+    echo "$(watcher_state_dir)/events.log"
+}
+
+restore_state_file() {
+    echo "$(watcher_state_dir)/restore.state"
+}
+
+ensure_watcher_state_dir() {
+    mkdir -p "$(watcher_stale_dir)" "$(watcher_notice_dir)"
+    touch "$(restore_state_file)" "$(watcher_event_log)"
+}
+
+watcher_pid_is_running() {
+    local pid="$1"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null
+}
+
+watcher_current_pid() {
+    local pid_file
+    pid_file="$(watcher_pid_file)"
+
+    if [[ -f "$pid_file" ]]; then
+        local pid
+        pid="$(<"$pid_file")"
+        if watcher_pid_is_running "$pid"; then
+            echo "$pid"
+            return 0
+        fi
+        rm -f "$pid_file"
+    fi
+
+    return 1
+}
+
+watcher_mark_stale() {
+    local host="$1"
+    local file
+    file="$(watcher_stale_dir)/$host"
+
+    if [[ ! -f "$file" ]]; then
+        date +%s > "$file"
+    fi
+}
+
+watcher_clear_stale() {
+    local host="$1"
+    rm -f "$(watcher_stale_dir)/$host"
+}
+
+watcher_stale_since() {
+    local host="$1"
+    local file
+    file="$(watcher_stale_dir)/$host"
+    [[ -f "$file" ]] || return 1
+    cat "$file"
+}
+
+watcher_clear_all_stale() {
+    rm -f "$(watcher_stale_dir)"/* 2>/dev/null || true
+}
+
+restore_record_mount() {
+    local host="$1" target="$2" remote_path="$3" mount_point="$4" mode="$5"
+    local file tmp
+    file="$(restore_state_file)"
+    tmp="${file}.tmp"
+
+    ensure_watcher_state_dir
+    awk -F '\t' -v host="$host" -v target="$target" '!(NF >= 2 && $1 == host && $2 == target)' "$file" > "$tmp" 2>/dev/null || true
+    printf '%s\t%s\t%s\t%s\t%s\n' "$host" "$target" "$remote_path" "$mount_point" "$mode" >> "$tmp"
+    mv "$tmp" "$file"
+}
+
+restore_remove_mount() {
+    local host="$1" target="$2"
+    local file tmp
+    file="$(restore_state_file)"
+    tmp="${file}.tmp"
+
+    ensure_watcher_state_dir
+    awk -F '\t' -v host="$host" -v target="$target" '!(NF >= 2 && $1 == host && $2 == target)' "$file" > "$tmp" 2>/dev/null || true
+    mv "$tmp" "$file"
+}
+
+restore_clear_host() {
+    local host="$1"
+    local file tmp
+    file="$(restore_state_file)"
+    tmp="${file}.tmp"
+
+    ensure_watcher_state_dir
+    awk -F '\t' -v host="$host" '!(NF >= 1 && $1 == host)' "$file" > "$tmp" 2>/dev/null || true
+    mv "$tmp" "$file"
+}
+
+restore_has_entries() {
+    local host="${1:-}"
+    local file
+    file="$(restore_state_file)"
+    [[ -f "$file" ]] || return 1
+
+    if [[ -n "$host" ]]; then
+        awk -F '\t' -v host="$host" 'NF >= 1 && $1 == host { found=1; exit } END { exit(found ? 0 : 1) }' "$file"
+    else
+        grep -q '[^[:space:]]' "$file" 2>/dev/null
+    fi
+}
+
+restore_print_entries() {
+    local host="${1:-}"
+    local file
+    file="$(restore_state_file)"
+    [[ -f "$file" ]] || return 0
+
+    if [[ -n "$host" ]]; then
+        awk -F '\t' -v host="$host" 'NF >= 5 && $1 == host { print }' "$file"
+    else
+        awk -F '\t' 'NF >= 5 { print }' "$file"
+    fi
+}
+
+watcher_notice_file() {
+    local host="$1"
+    echo "$(watcher_notice_dir)/$host"
+}
+
+watcher_notice_state() {
+    local host="$1"
+    local file
+    file="$(watcher_notice_file "$host")"
+    [[ -f "$file" ]] || return 1
+    cat "$file"
+}
+
+watcher_set_notice_state() {
+    local host="$1" state="$2"
+    ensure_watcher_state_dir
+    printf '%s\n' "$state" > "$(watcher_notice_file "$host")"
+}
+
+watcher_clear_notice_state() {
+    local host="$1"
+    rm -f "$(watcher_notice_file "$host")"
+}
+
+watcher_notice_transition() {
+    local host="$1" new_state="$2" message="$3"
+    local current_state=""
+
+    if current_state="$(watcher_notice_state "$host" 2>/dev/null)"; then
+        if [[ "$current_state" == "$new_state" ]]; then
+            return 0
+        fi
+    fi
+
+    echo -e "$message"
+    printf '%s\t%s\t%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$host" "$new_state" >> "$(watcher_event_log)"
+    watcher_set_notice_state "$host" "$new_state"
+}
+
+watcher_clear_all_notice_states() {
+    rm -f "$(watcher_notice_dir)"/* 2>/dev/null || true
+}
+
+watcher_recent_events() {
+    local log_file
+    log_file="$(watcher_event_log)"
+    [[ -f "$log_file" ]] || return 0
+    tail -n 5 "$log_file" 2>/dev/null || true
+}
+
+watcher_clear_all_stale() {
+    rm -f "$(watcher_stale_dir)"/* 2>/dev/null || true
+}
+
+watcher_host_probe() {
+    local host="$1"
+    ssh -o ConnectTimeout=5 "$host" "echo ok" &>/dev/null
+}
+
+watcher_start() {
+    local force="${1:-false}"
+
+    if [[ "$force" != "true" ]] && ! cfg_watcher_enabled; then
+        return 0
+    fi
+
+    local pid
+    if pid="$(watcher_current_pid)"; then
+        return 0
+    fi
+
+    if ! list_nexus_mounts | grep -q .; then
+        return 0
+    fi
+
+    ensure_watcher_state_dir
+    nohup "$0" watcher run >/dev/null 2>&1 &
+}
+
+cmd_watcher() {
+    local action="${1:-status}"
+    local pid
+
+    case "$action" in
+        run)
+            ensure_watcher_state_dir
+            echo $$ > "$(watcher_pid_file)"
+            trap 'rm -f "$(watcher_pid_file)"; watcher_clear_all_stale' EXIT INT TERM
+
+            local interval grace
+            interval="$(cfg_watcher_interval)"
+            grace="$(cfg_watcher_grace)"
+
+            while true; do
+                local has_mounts=false
+                local seen_hosts=" "
+                local now
+                now=$(date +%s)
+
+                while IFS=$'\t' read -r host _ mount_point; do
+                    [[ -n "$mount_point" ]] || continue
+                    has_mounts=true
+
+                    if [[ "$seen_hosts" == *" $host "* ]]; then
+                        continue
+                    fi
+                    seen_hosts+="$host "
+
+                    if check_connection "$host" 2>/dev/null; then
+                        if watcher_stale_since "$host" >/dev/null 2>&1; then
+                            watcher_notice_transition "$host" recovered "${GREEN}[watcher] ${host} 连接已恢复，取消自动卸载${NC}"
+                        fi
+                        watcher_clear_stale "$host"
+                        continue
+                    fi
+
+                    watcher_mark_stale "$host"
+                    watcher_notice_transition "$host" stale "${YELLOW}[watcher] ${host} 连接异常，已进入观察期 (${grace}s)${NC}"
+                    local stale_since
+                    stale_since="$(watcher_stale_since "$host")"
+                    if [[ -z "$stale_since" ]]; then
+                        continue
+                    fi
+
+                    if (( now - stale_since < grace )); then
+                        continue
+                    fi
+
+                    if watcher_host_probe "$host"; then
+                        watcher_notice_transition "$host" recovered "${GREEN}[watcher] ${host} 连接已恢复，取消自动卸载${NC}"
+                        watcher_clear_stale "$host"
+                        continue
+                    fi
+
+                    cmd_umount "$host" "" watcher_auto
+                    watcher_notice_transition "$host" unmounted "${YELLOW}[watcher] ${host} 持续不可达，已自动卸载挂载；恢复后可运行 nexus restore ${host}${NC}"
+                    watcher_clear_stale "$host"
+                done < <(list_nexus_mounts)
+
+                if ! $has_mounts; then
+                    break
+                fi
+
+                for stale_file in "$(watcher_stale_dir)"/*; do
+                    [[ -e "$stale_file" ]] || break
+                    local stale_host
+                    stale_host="$(basename "$stale_file")"
+                    if [[ "$seen_hosts" != *" $stale_host "* ]]; then
+                        rm -f "$stale_file"
+                    fi
+                done
+
+                sleep "$interval"
+            done
+            ;;
+        start)
+            watcher_start true
+            if pid="$(watcher_current_pid)"; then
+                echo -e "${GREEN}[OK] watcher 运行中 (pid: ${pid})${NC}"
+            else
+                echo -e "${YELLOW}当前没有挂载，watcher 未启动${NC}"
+            fi
+            ;;
+        stop)
+            if pid="$(watcher_current_pid)"; then
+                kill "$pid" 2>/dev/null || true
+                rm -f "$(watcher_pid_file)"
+                watcher_clear_all_stale
+                echo -e "${GREEN}[OK] watcher 已停止${NC}"
+            else
+                echo -e "${YELLOW}watcher 未运行${NC}"
+            fi
+            ;;
+        status)
+            local interval grace
+            interval="$(cfg_watcher_interval)"
+            grace="$(cfg_watcher_grace)"
+
+            if pid="$(watcher_current_pid)"; then
+                echo -e "${GREEN}watcher 运行中${NC} (pid: ${pid}, interval: ${interval}s, grace: ${grace}s)"
+            else
+                echo -e "${YELLOW}watcher 未运行${NC}"
+            fi
+
+            local has_stale=false
+            local now
+            now=$(date +%s)
+            for stale_file in "$(watcher_stale_dir)"/*; do
+                [[ -e "$stale_file" ]] || break
+                has_stale=true
+                local host stale_since elapsed
+                host="$(basename "$stale_file")"
+                stale_since="$(<"$stale_file")"
+                elapsed=$(( now - stale_since ))
+                echo -e "  ${YELLOW}▲${NC} ${host} 已连续异常 ${elapsed}s / ${grace}s"
+            done
+
+            if ! $has_stale; then
+                echo -e "  ${GREEN}无 stale host${NC}"
+            fi
+
+            local has_events=false
+            while IFS=$'\t' read -r ts host state; do
+                [[ -n "$ts" ]] || continue
+                if ! $has_events; then
+                    echo -e "  ${CYAN}最近事件:${NC}"
+                    has_events=true
+                fi
+                echo -e "    ${ts} ${host} -> ${state}"
+            done < <(watcher_recent_events)
+            ;;
+        *)
+            echo -e "${RED}用法: nexus watcher <start|stop|status|run>${NC}"
+            return 1
+            ;;
+    esac
+}
+
 # 更新 general section 中的 control_persist
 set_control_persist() {
     local config_file="$1" persist="$2"
@@ -186,18 +578,12 @@ cmd_connect() {
 cmd_disconnect() {
     local host="${1:?用法: nexus disconnect <host>}"
 
-    local had_mounts=false
-    while IFS= read -r line; do
-        if [[ "$line" == *"$MOUNT_BASE/$host"* ]]; then
-            had_mounts=true
-            break
-        fi
-    done < <(mount | grep -i "fuse\|sshfs" 2>/dev/null || true)
-
-    if $had_mounts; then
+    if host_has_mounts "$host"; then
         echo -e "${CYAN}检测到 ${host} 仍有 SSHFS 挂载，先自动卸载...${NC}"
         cmd_umount "$host"
     fi
+
+    restore_clear_host "$host"
 
     if check_connection "$host"; then
         ssh -S "$(get_socket_path "$host")" -O exit "$host" 2>/dev/null
@@ -215,6 +601,8 @@ cmd_status() {
     echo -e "${CYAN}[SSH ControlMaster]${NC}"
     local has_connection=false
     for host in $(cfg_get_servers); do
+        cleanup_stale_socket "$host" >/dev/null 2>&1 || true
+
         if check_connection "$host" 2>/dev/null; then
             echo -e "  ${GREEN}●${NC} ${host} — 已连接"
             has_connection=true
@@ -231,17 +619,34 @@ cmd_status() {
     # SSHFS 挂载状态
     echo -e "${CYAN}[SSHFS 挂载]${NC}"
     local has_mount=false
-    if command -v mount &>/dev/null; then
-        while IFS= read -r line; do
-            if [[ "$line" == *"$MOUNT_BASE"* ]]; then
-                echo -e "  ${GREEN}●${NC} $line"
-                has_mount=true
+    while IFS=$'\t' read -r host target mount_point; do
+        [[ -n "$mount_point" ]] || continue
+        has_mount=true
+
+        if check_connection "$host" 2>/dev/null; then
+            if [[ -n "$target" ]]; then
+                echo -e "  ${GREEN}●${NC} ${host}:${target} — 已挂载 (${mount_point})"
+            else
+                echo -e "  ${GREEN}●${NC} ${host} — 已挂载 (${mount_point})"
             fi
-        done < <(mount | grep -i "fuse\|sshfs" 2>/dev/null || true)
-    fi
+        else
+            if [[ -n "$target" ]]; then
+                echo -e "  ${YELLOW}▲${NC} ${host}:${target} — 挂载残留，后端不可达 (${mount_point})"
+            else
+                echo -e "  ${YELLOW}▲${NC} ${host} — 挂载残留，后端不可达 (${mount_point})"
+            fi
+        fi
+    done < <(list_nexus_mounts)
+
     if ! $has_mount; then
         echo -e "  ${YELLOW}暂无挂载。使用 nexus mount <host> [target] 挂载${NC}"
+    else
+        echo -e "  ${YELLOW}提示: 若显示“挂载残留，后端不可达”，请先运行 nexus umount <host>${NC}"
     fi
+
+    echo ""
+    echo -e "${CYAN}[watcher]${NC}"
+    cmd_watcher status
 }
 
 cmd_mount() {
@@ -325,6 +730,10 @@ _do_mount() {
 
     if mount | grep -q "$mount_point" 2>/dev/null; then
         echo -e "${GREEN}[OK] ${host}:${remote_path} -> ${mount_point}${NC}"
+        local mode="configured"
+        [[ "$target" == "custom" ]] && mode="custom"
+        restore_record_mount "$host" "$target" "$remote_path" "$mount_point" "$mode"
+        watcher_start
     else
         echo -e "${RED}[FAIL] 挂载失败${NC}"
         return 1
@@ -334,21 +743,19 @@ _do_mount() {
 cmd_umount() {
     local host="${1:?用法: nexus umount <host> [target]}"
     local target="${2:-}"
+    local reason="${3:-explicit}"
 
     if [[ -n "$target" ]]; then
-        _do_umount "$host" "$target" "$MOUNT_BASE/$host/$target"
+        _do_umount "$host" "$target" "$MOUNT_BASE/$host/$target" "$reason"
     else
         # 卸载该 host 下所有挂载
         local found=false
-        while IFS= read -r line; do
-            if [[ "$line" == *"$MOUNT_BASE/$host"* ]]; then
-                local mp
-                mp=$(echo "$line" | awk '{print $3}')
-                [[ "$(uname)" == "Darwin" ]] && mp=$(echo "$line" | sed 's/.* on //;s/ (.*//')
-                _do_umount "$host" "" "$mp"
+        while IFS=$'\t' read -r mount_host mount_target mount_point; do
+            if [[ "$mount_host" == "$host" ]]; then
+                _do_umount "$host" "$mount_target" "$mount_point" "$reason"
                 found=true
             fi
-        done < <(mount | grep -i "fuse\|sshfs" 2>/dev/null || true)
+        done < <(list_nexus_mounts)
         if ! $found; then
             echo -e "${YELLOW}${host} 没有活跃的挂载${NC}"
         fi
@@ -356,7 +763,7 @@ cmd_umount() {
 }
 
 _do_umount() {
-    local host="$1" target="$2" mount_point="$3"
+    local host="$1" target="$2" mount_point="$3" reason="${4:-explicit}"
     local label="${host}"
     [[ -n "$target" ]] && label="${host}:${target}"
 
@@ -381,6 +788,77 @@ _do_umount() {
     fi
 
     echo -e "${GREEN}[OK] ${label} 已卸载${NC}"
+    if [[ "$reason" == "explicit" ]]; then
+        restore_remove_mount "$host" "$target"
+    fi
+}
+
+cmd_restore() {
+    local action="${1:-all}"
+    local host_arg=""
+
+    case "$action" in
+        status)
+            if restore_has_entries; then
+                while IFS=$'\t' read -r host target remote_path mount_point mode; do
+                    echo -e "${CYAN}${host}:${target}${NC} -> ${remote_path} (${mode})"
+                done < <(restore_print_entries)
+            else
+                echo -e "${YELLOW}当前没有可恢复的挂载记录${NC}"
+            fi
+            return 0
+            ;;
+        clear)
+            host_arg="${2:-}"
+            if [[ -n "$host_arg" ]]; then
+                restore_clear_host "$host_arg"
+                echo -e "${GREEN}[OK] 已清空 ${host_arg} 的恢复记录${NC}"
+            else
+                : > "$(restore_state_file)"
+                echo -e "${GREEN}[OK] 已清空所有恢复记录${NC}"
+            fi
+            return 0
+            ;;
+        all)
+            ;;
+        *)
+            host_arg="$action"
+            ;;
+    esac
+
+    if [[ -n "$host_arg" ]] && ! restore_has_entries "$host_arg"; then
+        echo -e "${YELLOW}${host_arg} 没有可恢复的挂载记录${NC}"
+        return 0
+    elif [[ -z "$host_arg" ]] && ! restore_has_entries; then
+        echo -e "${YELLOW}当前没有可恢复的挂载记录${NC}"
+        return 0
+    fi
+
+    local current_host=""
+    while IFS=$'\t' read -r host target remote_path mount_point mode; do
+        [[ -n "$host" ]] || continue
+
+        if [[ -n "$host_arg" && "$host" != "$host_arg" ]]; then
+            continue
+        fi
+
+        if [[ "$host" != "$current_host" ]]; then
+            current_host="$host"
+            echo -e "${CYAN}恢复 ${host}...${NC}"
+            if ! check_connection "$host" 2>/dev/null; then
+                cmd_connect "$host" || continue
+            fi
+            if host_has_mounts "$host" && ! check_connection "$host" 2>/dev/null; then
+                cmd_umount "$host" "" restore_reconcile
+            fi
+        fi
+
+        if [[ "$mode" == "custom" ]]; then
+            _do_mount "$host" "$target" "$remote_path"
+        else
+            cmd_mount "$host" "$target"
+        fi
+    done < <(restore_print_entries "$host_arg")
 }
 
 cmd_sync() {
@@ -418,6 +896,10 @@ cmd_health() {
     for host in $(cfg_get_servers); do
         if ! check_connection "$host" 2>/dev/null; then
             echo -e "  ${RED}✗${NC} ${host} — 无连接"
+            if host_has_mounts "$host"; then
+                echo -e "    ${YELLOW}发现 SSHFS 挂载残留，后端不可达。请运行: nexus umount ${host}${NC}"
+                all_ok=false
+            fi
             continue
         fi
 
@@ -438,6 +920,9 @@ cmd_health() {
             # 尝试清理无效 socket
             echo -e "    ${YELLOW}清理无效 socket...${NC}"
             ssh -S "$(get_socket_path "$host")" -O exit "$host" 2>/dev/null || cleanup_stale_socket "$host" || true
+            if host_has_mounts "$host"; then
+                echo -e "    ${YELLOW}发现 SSHFS 挂载残留，后端不可达。请运行: nexus umount ${host}${NC}"
+            fi
         fi
     done
 
@@ -445,7 +930,7 @@ cmd_health() {
     if $all_ok; then
         echo -e "${GREEN}所有连接正常${NC}"
     else
-        echo -e "${YELLOW}提示: 使用 nexus connect <host> 重建失效连接${NC}"
+        echo -e "${YELLOW}提示: 使用 nexus connect <host> 重建连接；若有残留挂载，先执行 nexus umount <host>${NC}"
     fi
 }
 
@@ -748,8 +1233,39 @@ cmd_init() {
     fi
     [[ "$control_persist" == "forever" ]] && control_persist="yes"
 
+    local watcher_enabled="false"
+    read -rp "启用 watcher 自动清理 stale 挂载? [y/N]: " input_watcher_enabled
+    case "${input_watcher_enabled:-N}" in
+        y|Y|yes|YES)
+            watcher_enabled="true"
+            ;;
+        *)
+            watcher_enabled="false"
+            ;;
+    esac
+
+    local watcher_interval="5"
+    read -rp "watcher 轮询间隔（秒）[${watcher_interval}]: " input_watcher_interval
+    watcher_interval="${input_watcher_interval:-$watcher_interval}"
+    if ! [[ "$watcher_interval" =~ ^[1-9][0-9]*$ ]]; then
+        echo -e "${RED}watcher_interval 必须是正整数秒数${NC}"
+        return 1
+    fi
+
+    local watcher_grace="10"
+    read -rp "watcher 宽限时间（秒）[${watcher_grace}]: " input_watcher_grace
+    watcher_grace="${input_watcher_grace:-$watcher_grace}"
+    if ! [[ "$watcher_grace" =~ ^[1-9][0-9]*$ ]]; then
+        echo -e "${RED}watcher_grace 必须是正整数秒数${NC}"
+        return 1
+    fi
+
+    local watcher_state_dir="~/.local/state/nexus"
+    read -rp "watcher 状态目录 [${watcher_state_dir}]: " input_watcher_state_dir
+    watcher_state_dir="${input_watcher_state_dir:-$watcher_state_dir}"
+
     # 生成配置头
-    cfg_write_config "$config_file" "$user" "$control_persist"
+    cfg_write_config "$config_file" "$user" "$control_persist" "$watcher_enabled" "$watcher_interval" "$watcher_grace" "$watcher_state_dir"
 
     # 扫描 SSH hosts
     echo ""
@@ -792,6 +1308,8 @@ NexusEnv - 多机办公环境管理工具
   disconnect <host>             先卸载该 host 的挂载，再关闭 SSH 连接
   ssh <host> [command...]       SSH 到服务器（自动 cd 到工作目录）
   health                        检查连接健康状态（含延迟测量）
+  restore [host|action]         恢复或管理之前记录的挂载（status/clear）
+  watcher <action>              管理 stale SSHFS 自动清理 watcher（start/stop/status）
   status                        查看所有连接和挂载状态
   mount <host> [target|path]    SSHFS 挂载远程目录
   umount <host> [target]        卸载 SSHFS
@@ -819,6 +1337,9 @@ NexusEnv - 多机办公环境管理工具
   nexus claude myserver /data/workspace/proj  # 生成 CLAUDE.md
   nexus codex myserver /data/workspace/proj   # 生成 AGENTS.md
   nexus status                  # 查看状态
+  nexus restore                 # 恢复之前记录的挂载
+  nexus watcher start           # 启动 stale mount watcher
+  nexus watcher status          # 查看 watcher 状态
 
 配置文件: ~/.config/nexus/config
 EOF
@@ -831,6 +1352,8 @@ case "${1:-help}" in
     disconnect) shift; cmd_disconnect "$@" ;;
     ssh)        shift; cmd_ssh "$@" ;;
     health)     cmd_health ;;
+    restore)    shift; cmd_restore "$@" ;;
+    watcher)    shift; cmd_watcher "$@" ;;
     status)     cmd_status ;;
     mount)      shift; cmd_mount "$@" ;;
     umount)     shift; cmd_umount "$@" ;;
