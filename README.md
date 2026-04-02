@@ -106,9 +106,12 @@ nexus set-timeout
 - 新值会在下次 `nexus connect <host>` 时生效
 - `nexus disconnect <host>` 会先自动卸载该 host 的挂载，再关闭连接
 - 已经存在的连接不会被强制更新；如需立即生效，先 `disconnect` 再 `connect`
+
+## SSHFS 异常恢复
+
 - 远程服务器断开或关机后，操作系统可能仍暂时保留 SSHFS 挂载记录；`nexus status` 会将其标记为“挂载残留，后端不可达”，此时先执行 `nexus umount <host>` 再继续操作
 - 若启用了 watcher，成功挂载后会自动启动轮询；只有存在挂载时才运行，若 host 持续不可达超过 `watcher_grace`，会自动卸载对应挂载
-- 成功挂载后会记录 restore intent；若之后因为本地重启、睡眠或 watcher 自动卸载导致挂载消失，可用 `nexus restore [host]` 快速恢复
+- 成功挂载后会记录 restore intent；若之后因为本地重启、睡眠或 watcher 自动卸载导致挂载消失，可用 `nexus restore` 或 `nexus restore <host>` 快速恢复
 - 显式 `nexus umount` / `nexus disconnect` 会清除对应的 restore intent；watcher 自动卸载不会清除
 
 ## 命令参考
@@ -122,7 +125,10 @@ nexus set-timeout
 | `nexus umount <host> [target]` | 卸载挂载 |
 | `nexus status` | 查看连接和挂载状态 |
 | `nexus health` | 连接健康检查 |
-| `nexus restore [host|action]` | 恢复或管理之前记录的挂载 |
+| `nexus restore` | 恢复所有记录过的挂载 |
+| `nexus restore <host>` | 恢复单个 host 的挂载 |
+| `nexus restore status` | 查看当前恢复记录 |
+| `nexus restore clear [host]` | 清空恢复记录 |
 | `nexus watcher <action>` | 管理 stale SSHFS 自动清理 watcher |
 | `nexus claude <host> <path>` | 为远程项目生成 CLAUDE.md |
 | `nexus codex <host> <path>` | 为远程项目生成 AGENTS.md |
@@ -132,7 +138,7 @@ nexus set-timeout
 | `nexus init` | 扫描 SSH 配置并生成 nexus 配置 |
 | `nexus setup` | 运行完整安装流程 |
 
-挂载补充：
+## 挂载与恢复示例
 
 ```bash
 nexus mount myserver              # 挂载 default_mounts
