@@ -59,6 +59,6 @@ ssh -O check {HOST}
 
 ## 注意事项
 
-- SSH ControlMaster 连接默认 4 小时超时，超时后需用户重新 `nexus connect`
+- SSH ControlMaster 连接保持时间由 NexusEnv 的 `control_persist` 配置决定，超时后需用户重新 `nexus connect`
 - SSHFS 挂载依赖 SSH 连接，连接断开后文件操作会报错（I/O error）
 - 有 sudo 权限，执行破坏性操作（rm -rf、systemctl stop 等）前务必确认

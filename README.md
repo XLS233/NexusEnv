@@ -68,7 +68,20 @@ export PATH="$HOME/.local/bin:$PATH"
 ~/mnt/myserver/nfs/
 ```
 
-### 3. 后续新增主机
+### 3. Claude Code / Codex
+
+```bash
+./nexus claude myserver /data/workspace/my-project
+./nexus codex myserver /data/workspace/my-project
+```
+
+- `nexus claude` 会生成 `CLAUDE.md`
+- `nexus codex` 会生成 `AGENTS.md`
+- 远程项目路径既可以写绝对路径，也可以写 `~/...`
+- 生成位置优先是本地挂载的项目目录；只有在无法推导挂载路径时才回退到当前目录
+- 如果已推导出挂载路径但项目目录不存在，会直接报错，避免误写到当前目录
+
+### 4. 后续新增主机
 
 ```bash
 ./nexus add myserver
@@ -78,7 +91,7 @@ export PATH="$HOME/.local/bin:$PATH"
 - 传 host：添加指定主机
 - 不传：扫描 `~/.ssh/config` 中未配置的主机
 
-### 4. 调整连接保持时间
+### 5. 调整连接保持时间
 
 ```bash
 ./nexus set-timeout 43200
@@ -91,6 +104,7 @@ export PATH="$HOME/.local/bin:$PATH"
 - 可以填秒数，也可以填 `yes`（永久保持，直到手动断开）
 - 默认值是 `14400`（4 小时）
 - 新值会在下次 `./nexus connect <host>` 时生效
+- `./nexus disconnect <host>` 会先自动卸载该 host 的挂载，再关闭连接
 - 已经存在的连接不会被强制更新；如需立即生效，先 `disconnect` 再 `connect`
 
 ## 命令参考
@@ -98,13 +112,14 @@ export PATH="$HOME/.local/bin:$PATH"
 | 命令 | 说明 |
 |------|------|
 | `./nexus connect <host>` | 建立 SSH 连接（需要 2FA） |
-| `./nexus disconnect <host>` | 关闭 SSH 连接 |
+| `./nexus disconnect <host>` | 先卸载该 host 的挂载，再关闭 SSH 连接 |
 | `./nexus ssh <host> [cmd...]` | SSH 到服务器，支持交互式或单条命令 |
 | `./nexus mount <host> [target]` | 挂载远程目录 |
 | `./nexus umount <host> [target]` | 卸载挂载 |
 | `./nexus status` | 查看连接和挂载状态 |
 | `./nexus health` | 连接健康检查 |
 | `./nexus claude <host> <path>` | 为远程项目生成 CLAUDE.md |
+| `./nexus codex <host> <path>` | 为远程项目生成 AGENTS.md |
 | `./nexus sync <host>` | 同步 NexusEnv 到远程服务器 |
 | `./nexus add [host]` | 添加服务器到已有配置 |
 | `./nexus set-timeout [seconds]` | 设置连接保持时间（秒或 `yes`） |
@@ -153,9 +168,11 @@ depends =
 | `ssh_workdir` | `nexus ssh` 默认进入的目录 |
 | `depends` | 依赖的跳板机 |
 
-## Claude Code 工作流
+## AI Coding Agent 工作流
 
-远程项目挂载到本地后，可以直接用本地 Claude Code 开发：
+远程项目挂载到本地后，可以直接用本地 AI coding agent 开发：
+
+### Claude Code
 
 ```bash
 ./nexus connect myserver
@@ -163,6 +180,16 @@ depends =
 ./nexus claude myserver /data/workspace/my-project
 cd ~/mnt/myserver/workspace/my-project
 claude
+```
+
+### Codex
+
+```bash
+./nexus connect myserver
+./nexus mount myserver
+./nexus codex myserver /data/workspace/my-project
+cd ~/mnt/myserver/workspace/my-project
+codex
 ```
 
 此时：

@@ -82,7 +82,20 @@ get_socket_path() {
 # 检查指定 host 的连接状态
 check_connection() {
     local host="$1"
-    ssh -O check "$host" 2>/dev/null
+    ssh -S "$(get_socket_path "$host")" -O check "$host" 2>/dev/null
+}
+
+cleanup_stale_socket() {
+    local host="$1"
+    local socket
+    socket="$(get_socket_path "$host")"
+
+    if [[ -e "$socket" ]] && ! check_connection "$host" 2>/dev/null; then
+        rm -f "$socket"
+        return 0
+    fi
+
+    return 1
 }
 
 # 更新 general section 中的 control_persist
@@ -156,6 +169,10 @@ cmd_connect() {
     echo -e "${CYAN}正在连接 ${host}...${NC}"
     echo -e "${YELLOW}请完成认证（可能需要2FA）${NC}"
 
+    if cleanup_stale_socket "$host"; then
+        echo -e "${YELLOW}检测到失效的 ControlMaster socket，已自动清理${NC}"
+    fi
+
     ssh -o ControlMaster=yes -o ControlPersist="$persist" -S "$(get_socket_path "$host")" -fN "$host"
 
     if check_connection "$host"; then
@@ -168,8 +185,22 @@ cmd_connect() {
 
 cmd_disconnect() {
     local host="${1:?用法: nexus disconnect <host>}"
+
+    local had_mounts=false
+    while IFS= read -r line; do
+        if [[ "$line" == *"$MOUNT_BASE/$host"* ]]; then
+            had_mounts=true
+            break
+        fi
+    done < <(mount | grep -i "fuse\|sshfs" 2>/dev/null || true)
+
+    if $had_mounts; then
+        echo -e "${CYAN}检测到 ${host} 仍有 SSHFS 挂载，先自动卸载...${NC}"
+        cmd_umount "$host"
+    fi
+
     if check_connection "$host"; then
-        ssh -O exit "$host" 2>/dev/null
+        ssh -S "$(get_socket_path "$host")" -O exit "$host" 2>/dev/null
         echo -e "${GREEN}[OK] ${host} 连接已关闭${NC}"
     else
         echo -e "${YELLOW}${host} 本来就没有活跃连接${NC}"
@@ -406,7 +437,7 @@ cmd_health() {
             all_ok=false
             # 尝试清理无效 socket
             echo -e "    ${YELLOW}清理无效 socket...${NC}"
-            ssh -O exit "$host" 2>/dev/null || true
+            ssh -S "$(get_socket_path "$host")" -O exit "$host" 2>/dev/null || cleanup_stale_socket "$host" || true
         fi
     done
 
@@ -452,14 +483,30 @@ cmd_ssh() {
     fi
 }
 
-cmd_claude() {
-    local host="${1:?用法: nexus claude <host> <remote_project_path>}"
-    local remote_path="${2:?用法: nexus claude <host> <remote_project_path>}"
+generate_agent_doc() {
+    local tool="$1" host="$2" remote_path="$3"
+    local output_name cli_name tool_label
 
-    # 获取服务器类型
+    case "$tool" in
+        claude)
+            output_name="CLAUDE.md"
+            cli_name="claude"
+            tool_label="Claude Code"
+            ;;
+        codex)
+            output_name="AGENTS.md"
+            cli_name="codex"
+            tool_label="Codex"
+            ;;
+        *)
+            echo -e "${RED}不支持的工具类型: ${tool}${NC}"
+            return 1
+            ;;
+    esac
+
     local stype
     stype="$(cfg_get_type "$host")"
-    local template_file="$SCRIPT_DIR/templates/claude-${stype}.md"
+    local template_file="$SCRIPT_DIR/templates/${tool}-${stype}.md"
 
     if [[ ! -f "$template_file" ]]; then
         echo -e "${RED}未找到模板: ${template_file}${NC}"
@@ -467,18 +514,25 @@ cmd_claude() {
         return 1
     fi
 
-    # 推导项目名（取远程路径最后一段）
     local project_name
     project_name="$(basename "$remote_path")"
 
-    # 查找本地挂载点：遍历该 host 的挂载，找到包含 remote_path 的挂载
+    local resolved_remote_path="$remote_path"
+    if [[ "$resolved_remote_path" == "~" || "$resolved_remote_path" == "~/"* ]]; then
+        if check_connection "$host" 2>/dev/null; then
+            local remote_home
+            remote_home=$(ssh "$host" 'echo $HOME' 2>/dev/null)
+            [[ -n "$remote_home" ]] && resolved_remote_path="${resolved_remote_path/#\~/$remote_home}"
+        fi
+    fi
+
     local local_mount=""
+    local output_file=""
     for target in $(get_mount_targets "$host") home; do
         local rpath
         rpath="$(get_remote_path "$host" "$target")"
         local mp="$MOUNT_BASE/$host/$target"
 
-        # 展开远程 ~ 为实际路径
         if [[ "$rpath" == "~" || "$rpath" == "~/"* ]]; then
             if check_connection "$host" 2>/dev/null; then
                 local remote_home
@@ -487,9 +541,8 @@ cmd_claude() {
             fi
         fi
 
-        # 检查 remote_path 是否在此挂载下
-        if [[ "$remote_path" == "$rpath"* ]]; then
-            local relative="${remote_path#"$rpath"}"
+        if [[ "$resolved_remote_path" == "$rpath"* ]]; then
+            local relative="${resolved_remote_path#"$rpath"}"
             local_mount="${mp}${relative}"
             break
         fi
@@ -497,23 +550,17 @@ cmd_claude() {
 
     if [[ -z "$local_mount" ]]; then
         echo -e "${YELLOW}无法确定本地挂载路径，请确保已运行 nexus mount ${host}${NC}"
-        echo -e "${YELLOW}将使用远程路径作为占位: ${remote_path}${NC}"
+        echo -e "${YELLOW}将生成到当前目录: ./${output_name}${NC}"
         local_mount="~/mnt/${host}/...${remote_path}"
-    fi
-
-    # 检查本地挂载目录是否存在
-    local output_file=""
-    if [[ -d "$local_mount" ]]; then
-        output_file="$local_mount/CLAUDE.md"
+        output_file="./${output_name}"
+    elif [[ -d "$local_mount" ]]; then
+        output_file="$local_mount/${output_name}"
     else
-        # 挂载目录不存在，输出到当前目录
-        echo -e "${YELLOW}本地挂载目录不存在: ${local_mount}${NC}"
-        echo -e "${YELLOW}请确保已运行: nexus mount ${host}${NC}"
-        output_file="./CLAUDE.md"
-        echo -e "${CYAN}将生成到当前目录: ${output_file}${NC}"
+        echo -e "${RED}已推导出本地挂载路径，但项目目录不存在: ${local_mount}${NC}"
+        echo -e "${YELLOW}请先确认远程目录存在，或先在挂载目录中创建该项目目录${NC}"
+        return 1
     fi
 
-    # 替换模板占位符
     local content
     content=$(<"$template_file")
     content="${content//\{HOST\}/$host}"
@@ -521,7 +568,6 @@ cmd_claude() {
     content="${content//\{PROJECT_NAME\}/$project_name}"
     content="${content//\{LOCAL_MOUNT\}/$local_mount}"
 
-    # 检查目标文件是否已存在
     if [[ -f "$output_file" ]]; then
         echo -e "${YELLOW}已存在: ${output_file}${NC}"
         read -rp "覆盖? [y/N] " ans
@@ -529,11 +575,23 @@ cmd_claude() {
     fi
 
     echo "$content" > "$output_file"
-    echo -e "${GREEN}[OK] CLAUDE.md 已生成: ${output_file}${NC}"
+    echo -e "${GREEN}[OK] ${output_name} 已生成: ${output_file}${NC}"
     echo -e "${CYAN}模板类型: ${stype}${NC}"
     echo -e ""
-    echo -e "现在可以进入项目目录启动 Claude Code:"
-    echo -e "  ${CYAN}cd $(dirname "$output_file") && claude${NC}"
+    echo -e "现在可以进入项目目录启动 ${tool_label}:"
+    echo -e "  ${CYAN}cd $(dirname "$output_file") && ${cli_name}${NC}"
+}
+
+cmd_claude() {
+    local host="${1:?用法: nexus claude <host> <remote_project_path>}"
+    local remote_path="${2:?用法: nexus claude <host> <remote_project_path>}"
+    generate_agent_doc claude "$host" "$remote_path"
+}
+
+cmd_codex() {
+    local host="${1:?用法: nexus codex <host> <remote_project_path>}"
+    local remote_path="${2:?用法: nexus codex <host> <remote_project_path>}"
+    generate_agent_doc codex "$host" "$remote_path"
 }
 
 # 交互式添加单个服务器到配置文件
@@ -731,13 +789,14 @@ NexusEnv - 多机办公环境管理工具
 
 命令:
   connect <host>                建立 SSH ControlMaster 连接（需要2FA）
-  disconnect <host>             关闭 SSH 连接
+  disconnect <host>             先卸载该 host 的挂载，再关闭 SSH 连接
   ssh <host> [command...]       SSH 到服务器（自动 cd 到工作目录）
   health                        检查连接健康状态（含延迟测量）
   status                        查看所有连接和挂载状态
   mount <host> [target|path]    SSHFS 挂载远程目录
   umount <host> [target]        卸载 SSHFS
   claude <host> <project_path>  为远程项目生成 Claude Code 配置文件
+  codex <host> <project_path>   为远程项目生成 Codex 配置文件
   sync <host>                   同步 NexusEnv 到远程服务器
   add [host]                    添加服务器到已有配置（不指定则列出未配置的）
   set-timeout [seconds]         设置连接保持时间（秒，或 yes=永久）
@@ -758,6 +817,7 @@ NexusEnv - 多机办公环境管理工具
   nexus mount myserver /tmp         # 挂载自定义路径
   nexus umount myserver             # 卸载该服务器所有挂载
   nexus claude myserver /data/workspace/proj  # 生成 CLAUDE.md
+  nexus codex myserver /data/workspace/proj   # 生成 AGENTS.md
   nexus status                  # 查看状态
 
 配置文件: ~/.config/nexus/config
@@ -775,6 +835,7 @@ case "${1:-help}" in
     mount)      shift; cmd_mount "$@" ;;
     umount)     shift; cmd_umount "$@" ;;
     claude)     shift; cmd_claude "$@" ;;
+    codex)      shift; cmd_codex "$@" ;;
     sync)       shift; cmd_sync "$@" ;;
     add)        shift; cmd_add "$@" ;;
     set-timeout) shift; cmd_set_timeout "$@" ;;
