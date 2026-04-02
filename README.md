@@ -27,10 +27,10 @@ cd ~/NexusEnv
 1. 安装 SSHFS 依赖
 2. 配置 SSH ControlMaster
 3. 创建 `~/mnt/`
-4. 运行 `./nexus init` 生成配置
+4. 运行 `nexus init` 生成配置
 5. 链接 `nexus` 到 `~/.local/bin/`
 
-如果 `~/.local/bin` 不在 PATH 中：
+如果 `~/.local/bin` 不在 PATH 中，把下面这行加到你的 shell 配置文件（如 `~/.bashrc` 或 `~/.zshrc`）后重新打开终端：
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
@@ -41,7 +41,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ### 1. 初始化
 
 ```bash
-./nexus init
+nexus init
 ```
 
 初始化时会交互式询问：
@@ -54,10 +54,10 @@ export PATH="$HOME/.local/bin:$PATH"
 ### 2. 连接、挂载、进入
 
 ```bash
-./nexus connect myserver
-./nexus mount myserver
-./nexus ssh myserver
-./nexus status
+nexus connect myserver
+nexus mount myserver
+nexus ssh myserver
+nexus status
 ```
 
 挂载后目录位于：
@@ -71,8 +71,8 @@ export PATH="$HOME/.local/bin:$PATH"
 ### 3. Claude Code / Codex
 
 ```bash
-./nexus claude myserver /data/workspace/my-project
-./nexus codex myserver /data/workspace/my-project
+nexus claude myserver /data/workspace/my-project
+nexus codex myserver /data/workspace/my-project
 ```
 
 - `nexus claude` 会生成 `CLAUDE.md`
@@ -84,8 +84,8 @@ export PATH="$HOME/.local/bin:$PATH"
 ### 4. 后续新增主机
 
 ```bash
-./nexus add myserver
-./nexus add
+nexus add myserver
+nexus add
 ```
 
 - 传 host：添加指定主机
@@ -94,45 +94,45 @@ export PATH="$HOME/.local/bin:$PATH"
 ### 5. 调整连接保持时间
 
 ```bash
-./nexus set-timeout 43200
-./nexus set-timeout yes
-./nexus set-timeout
+nexus set-timeout 43200
+nexus set-timeout yes
+nexus set-timeout
 ```
 
 说明：
 
 - 可以填秒数，也可以填 `yes`（永久保持，直到手动断开）
 - 默认值是 `14400`（4 小时）
-- 新值会在下次 `./nexus connect <host>` 时生效
-- `./nexus disconnect <host>` 会先自动卸载该 host 的挂载，再关闭连接
+- 新值会在下次 `nexus connect <host>` 时生效
+- `nexus disconnect <host>` 会先自动卸载该 host 的挂载，再关闭连接
 - 已经存在的连接不会被强制更新；如需立即生效，先 `disconnect` 再 `connect`
 
 ## 命令参考
 
 | 命令 | 说明 |
 |------|------|
-| `./nexus connect <host>` | 建立 SSH 连接（需要 2FA） |
-| `./nexus disconnect <host>` | 先卸载该 host 的挂载，再关闭 SSH 连接 |
-| `./nexus ssh <host> [cmd...]` | SSH 到服务器，支持交互式或单条命令 |
-| `./nexus mount <host> [target]` | 挂载远程目录 |
-| `./nexus umount <host> [target]` | 卸载挂载 |
-| `./nexus status` | 查看连接和挂载状态 |
-| `./nexus health` | 连接健康检查 |
-| `./nexus claude <host> <path>` | 为远程项目生成 CLAUDE.md |
-| `./nexus codex <host> <path>` | 为远程项目生成 AGENTS.md |
-| `./nexus sync <host>` | 同步 NexusEnv 到远程服务器 |
-| `./nexus add [host]` | 添加服务器到已有配置 |
-| `./nexus set-timeout [seconds]` | 设置连接保持时间（秒或 `yes`） |
-| `./nexus init` | 扫描 SSH 配置并生成 nexus 配置 |
-| `./nexus setup` | 运行完整安装流程 |
+| `nexus connect <host>` | 建立 SSH 连接（需要 2FA） |
+| `nexus disconnect <host>` | 先卸载该 host 的挂载，再关闭 SSH 连接 |
+| `nexus ssh <host> [cmd...]` | SSH 到服务器，支持交互式或单条命令 |
+| `nexus mount <host> [target]` | 挂载远程目录 |
+| `nexus umount <host> [target]` | 卸载挂载 |
+| `nexus status` | 查看连接和挂载状态 |
+| `nexus health` | 连接健康检查 |
+| `nexus claude <host> <path>` | 为远程项目生成 CLAUDE.md |
+| `nexus codex <host> <path>` | 为远程项目生成 AGENTS.md |
+| `nexus sync <host>` | 同步 NexusEnv 到远程服务器 |
+| `nexus add [host]` | 添加服务器到已有配置 |
+| `nexus set-timeout [seconds]` | 设置连接保持时间（秒或 `yes`） |
+| `nexus init` | 扫描 SSH 配置并生成 nexus 配置 |
+| `nexus setup` | 运行完整安装流程 |
 
 挂载补充：
 
 ```bash
-./nexus mount myserver              # 挂载 default_mounts
-./nexus mount myserver workspace    # 只挂载某个 target
-./nexus mount myserver all          # 挂载所有 target
-./nexus mount myserver /tmp         # 挂载自定义远程绝对路径
+nexus mount myserver              # 挂载 default_mounts
+nexus mount myserver workspace    # 只挂载某个 target
+nexus mount myserver all          # 挂载所有 target
+nexus mount myserver /tmp         # 挂载自定义远程绝对路径
 ```
 
 ## 配置文件
@@ -175,9 +175,9 @@ depends =
 ### Claude Code
 
 ```bash
-./nexus connect myserver
-./nexus mount myserver
-./nexus claude myserver /data/workspace/my-project
+nexus connect myserver
+nexus mount myserver
+nexus claude myserver /data/workspace/my-project
 cd ~/mnt/myserver/workspace/my-project
 claude
 ```
@@ -185,9 +185,9 @@ claude
 ### Codex
 
 ```bash
-./nexus connect myserver
-./nexus mount myserver
-./nexus codex myserver /data/workspace/my-project
+nexus connect myserver
+nexus mount myserver
+nexus codex myserver /data/workspace/my-project
 cd ~/mnt/myserver/workspace/my-project
 codex
 ```
