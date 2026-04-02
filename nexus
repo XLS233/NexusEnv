@@ -135,7 +135,7 @@ PY
 
 validate_control_persist() {
     local value="$1"
-    [[ "$value" =~ ^[1-9][0-9]*$ ]]
+    [[ "$value" =~ ^[1-9][0-9]*$ || "$value" == "yes" || "$value" == "forever" ]]
 }
 
 # ========== 子命令 ==========
@@ -647,14 +647,16 @@ cmd_set_timeout() {
     if [[ -z "$persist" ]]; then
         local current
         current="$(cfg_control_persist)"
-        read -rp "连接保持时间（秒）[${current}]: " persist
+        read -rp "连接保持时间（秒，或 yes/forever）[${current}]: " persist
         persist="${persist:-$current}"
     fi
 
     if ! validate_control_persist "$persist"; then
-        echo -e "${RED}control_persist 必须是正整数秒数${NC}"
+        echo -e "${RED}control_persist 必须是正整数秒数，或 yes/forever${NC}"
         return 1
     fi
+
+    [[ "$persist" == "forever" ]] && persist="yes"
 
     set_control_persist "$config_file" "$persist"
     cfg_load
@@ -680,12 +682,13 @@ cmd_init() {
     user="${input_user:-$user}"
 
     local control_persist="14400"
-    read -rp "连接保持时间（秒）[${control_persist}]: " input_persist
+    read -rp "连接保持时间（秒，或 yes/forever）[${control_persist}]: " input_persist
     control_persist="${input_persist:-$control_persist}"
     if ! validate_control_persist "$control_persist"; then
-        echo -e "${RED}control_persist 必须是正整数秒数${NC}"
+        echo -e "${RED}control_persist 必须是正整数秒数，或 yes/forever${NC}"
         return 1
     fi
+    [[ "$control_persist" == "forever" ]] && control_persist="yes"
 
     # 生成配置头
     cfg_write_config "$config_file" "$user" "$control_persist"
@@ -737,7 +740,7 @@ NexusEnv - 多机办公环境管理工具
   claude <host> <project_path>  为远程项目生成 Claude Code 配置文件
   sync <host>                   同步 NexusEnv 到远程服务器
   add [host]                    添加服务器到已有配置（不指定则列出未配置的）
-  set-timeout [seconds]         设置连接保持时间（control_persist）
+  set-timeout [seconds]         设置连接保持时间（秒，或 yes=永久）
   init                          扫描 SSH 配置并生成 nexus 配置文件
   setup                         初始化安装（依赖 + 配置）
   help                          显示帮助

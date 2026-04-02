@@ -47,7 +47,7 @@ export PATH="$HOME/.local/bin:$PATH"
 初始化时会交互式询问：
 
 - 默认远程用户名
-- 连接保持时间 `control_persist`（秒）
+- 连接保持时间 `control_persist`（秒，或 `yes` 表示永久）
 - 每台主机的类型：`cloud` / `slurm`
 - 需要挂载的额外远程目录
 
@@ -82,12 +82,13 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ```bash
 ./nexus set-timeout 43200
+./nexus set-timeout yes
 ./nexus set-timeout
 ```
 
 说明：
 
-- 单位是秒
+- 可以填秒数，也可以填 `yes`（永久保持，直到手动断开）
 - 默认值是 `14400`（4 小时）
 - 新值会在下次 `./nexus connect <host>` 时生效
 - 已经存在的连接不会被强制更新；如需立即生效，先 `disconnect` 再 `connect`
@@ -106,7 +107,7 @@ export PATH="$HOME/.local/bin:$PATH"
 | `./nexus claude <host> <path>` | 为远程项目生成 CLAUDE.md |
 | `./nexus sync <host>` | 同步 NexusEnv 到远程服务器 |
 | `./nexus add [host]` | 添加服务器到已有配置 |
-| `./nexus set-timeout [seconds]` | 设置连接保持时间 |
+| `./nexus set-timeout [seconds]` | 设置连接保持时间（秒或 `yes`） |
 | `./nexus init` | 扫描 SSH 配置并生成 nexus 配置 |
 | `./nexus setup` | 运行完整安装流程 |
 
@@ -129,6 +130,8 @@ default_user = john
 mount_base = ~/mnt
 socket_dir = ~/.ssh/sockets
 control_persist = 14400
+# 或永久保持连接
+# control_persist = yes
 
 [server.myserver]
 type = cloud
@@ -143,7 +146,7 @@ depends =
 
 | 字段 | 说明 |
 |------|------|
-| `control_persist` | SSH 主连接保持时间，单位秒 |
+| `control_persist` | SSH 主连接保持时间，单位秒；也可设为 `yes` 表示永久保持 |
 | `type` | `cloud` 或 `slurm` |
 | `home`, `workspace`, `nfs`, ... | 远程路径；`~` 表示远程 home |
 | `default_mounts` | `mount` 无参数时默认挂载哪些目标 |
