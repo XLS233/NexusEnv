@@ -12,6 +12,10 @@ NC='\033[0m'
 OS="$(uname)"
 echo -e "${CYAN}=== NexusEnv Setup ===${NC}"
 echo -e "检测平台: ${GREEN}${OS}${NC}"
+if [[ "$OS" != "Linux" ]]; then
+    echo -e "${RED}NexusEnv 当前仅支持 Linux 环境${NC}"
+    exit 1
+fi
 echo ""
 
 # ===== 1. 安装 SSHFS 依赖 =====

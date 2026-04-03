@@ -2,9 +2,11 @@
 
 多机办公环境管理工具。基于 SSH ControlMaster + SSHFS：一次完成 2FA，后续 `ssh` / `sshfs` / `rsync` 复用连接。
 
+当前项目仅支持 Linux 环境。
+
 ## 适合什么场景
 
-- 管理多台远程服务器
+- 在 Linux 环境中管理多台远程服务器
 - 需要跳板机 / ProxyJump
 - 希望把远程目录挂到本地开发
 - 在本地运行 Claude Code，但直接操作远程项目
@@ -13,6 +15,7 @@
 
 前提：
 
+- Linux 环境
 - `~/.ssh/config` 已配置好目标主机
 - Bash 4+
 
